@@ -1,7 +1,7 @@
 use crate::ndjson::LineBuffer;
 use serde::Serialize;
 use std::io::Read;
-use std::net::{Shutdown, TcpStream};
+use std::net::{Shutdown, TcpStream, ToSocketAddrs};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tauri::{AppHandle, Emitter};
@@ -42,8 +42,8 @@ pub fn run_loop(app: AppHandle, shared: Arc<Shared>) {
         let target = shared.target.lock().unwrap().clone();
         emit_status(&app, "connecting", &target);
 
-        match TcpStream::connect((target.host.as_str(), target.port)) {
-            Ok(stream) => {
+        match connect(&target) {
+            Some(stream) => {
                 let _ = stream.set_nodelay(true);
                 let _ = stream.set_read_timeout(Some(Duration::from_secs(1)));
                 *shared.sock.lock().unwrap() = stream.try_clone().ok();
@@ -52,7 +52,7 @@ pub fn run_loop(app: AppHandle, shared: Arc<Shared>) {
                 *shared.sock.lock().unwrap() = None;
                 emit_status(&app, "reconnecting", &target);
             }
-            Err(_) => {
+            None => {
                 emit_status(&app, "reconnecting", &target);
             }
         }
@@ -60,6 +60,19 @@ pub fn run_loop(app: AppHandle, shared: Arc<Shared>) {
         // Back off before the next attempt (or after a set_tablet-triggered drop).
         std::thread::sleep(Duration::from_secs(2));
     }
+}
+
+/// Resolve the target and attempt a TCP connection with a bounded timeout so an
+/// unreachable host (e.g. the default IP on first launch) can't block a pending
+/// address change for the OS default connect timeout.
+fn connect(target: &Target) -> Option<TcpStream> {
+    let addrs = (target.host.as_str(), target.port).to_socket_addrs().ok()?;
+    for addr in addrs {
+        if let Ok(stream) = TcpStream::connect_timeout(&addr, Duration::from_secs(5)) {
+            return Some(stream);
+        }
+    }
+    None
 }
 
 fn read_stream(app: &AppHandle, mut stream: TcpStream) {
