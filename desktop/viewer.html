@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Stream Whiteboard</title>
+  <style>
+    :root { --ink: #111; --paper: #f7f6f2; --ui: #2a2a2a; --acc: #3d5a80; }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; min-height: 100vh; display: flex; flex-direction: column;
+      font: 14px/1.4 system-ui, -apple-system, Segoe UI, sans-serif;
+      background: #1a1a1a; color: #eee;
+    }
+    header {
+      display: flex; flex-wrap: wrap; gap: 10px; align-items: center;
+      padding: 10px 14px; background: #111; border-bottom: 1px solid #333;
+    }
+    header h1 { font-size: 15px; font-weight: 600; margin: 0 12px 0 0; letter-spacing: 0.02em; }
+    header input {
+      background: #222; border: 1px solid #444; color: #eee;
+      padding: 6px 10px; border-radius: 6px; width: 220px;
+    }
+    header button {
+      background: var(--acc); color: #fff; border: 0; padding: 7px 14px;
+      border-radius: 6px; cursor: pointer; font-weight: 600;
+    }
+    header button.ghost { background: #333; }
+    header button:disabled { opacity: 0.5; cursor: default; }
+    #status { margin-left: auto; font-size: 12px; color: #aaa; }
+    #status.on { color: #7dcea0; }
+    main {
+      flex: 1; display: flex; align-items: center; justify-content: center;
+      padding: 16px; overflow: auto;
+    }
+    .paper-wrap {
+      background: var(--paper); box-shadow: 0 12px 40px rgba(0,0,0,.45);
+      border-radius: 4px; line-height: 0;
+    }
+    canvas { display: block; max-width: min(90vw, 900px); height: auto; touch-action: none; }
+    footer { padding: 8px 14px; font-size: 11px; color: #666; border-top: 1px solid #222; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Stream Whiteboard</h1>
+    <input id="host" value="ws://127.0.0.1:27183" title="WebSocket URL from bridge" />
+    <button id="btnConnect">Connect</button>
+    <button id="btnClear" class="ghost">Clear view</button>
+    <span id="status">disconnected</span>
+  </header>
+  <main>
+    <div class="paper-wrap">
+      <canvas id="c" width="1404" height="1872"></canvas>
+    </div>
+  </main>
+  <footer>
+    Bridge: <code>python bridge.py --tablet 172.16.10.175</code>
+    · tablet must have <code>stream=1</code> in diary.conf · works on Windows &amp; Mac in any browser
+  </footer>
+  <script>
+    const COLORS = ['#111', '#444', '#777', '#aaa', '#b33', '#24a'];
+    const WIDTHS = [1.5, 2.5, 4.5];
+    const canvas = document.getElementById('c');
+    const ctx = canvas.getContext('2d');
+    let ws = null;
+    let pageW = 1404, pageH = 1872;
+    let live = new Map(); // id -> {points, tool, color, width}
+
+    function setStatus(t, on) {
+      const el = document.getElementById('status');
+      el.textContent = t;
+      el.classList.toggle('on', !!on);
+    }
+    function clearPaper() {
+      ctx.fillStyle = '#f7f6f2';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      live.clear();
+    }
+    function toolWidth(tool, w) {
+      if (tool === 'hl') return 16;
+      if (tool === 'erase') return 22;
+      return WIDTHS[Math.min(2, Math.max(0, w|0))] || 2.5;
+    }
+    function strokeStyle(tool, color) {
+      if (tool === 'erase') return '#f7f6f2';
+      if (tool === 'hl') return 'rgba(200,200,120,0.35)';
+      return COLORS[color|0] || '#111';
+    }
+    function drawPoly(pts, tool, color, width) {
+      if (!pts || pts.length < 1) return;
+      ctx.lineCap = 'round';
+      ctx.lineJoin = 'round';
+      ctx.strokeStyle = strokeStyle(tool, color);
+      ctx.lineWidth = toolWidth(tool, width);
+      ctx.beginPath();
+      ctx.moveTo(pts[0].x, pts[0].y);
+      for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i].x, pts[i].y);
+      if (pts.length === 1) {
+        ctx.arc(pts[0].x, pts[0].y, ctx.lineWidth / 2, 0, Math.PI * 2);
+        ctx.fillStyle = ctx.strokeStyle;
+        ctx.fill();
+      } else ctx.stroke();
+    }
+    function handle(msg) {
+      const t = msg.t;
+      if (t === 'hello') {
+        pageW = msg.w || 1404; pageH = msg.h || 1872;
+        canvas.width = pageW; canvas.height = pageH;
+        clearPaper();
+        setStatus(`connected · page ${ (msg.page|0)+1 }/${msg.pages|1}`, true);
+      } else if (t === 'page') {
+        setStatus(`connected · page ${ (msg.page|0)+1 }/${msg.pages|1}`, true);
+      } else if (t === 'clear') {
+        clearPaper();
+      } else if (t === 'undo') {
+        // simple: wipe last committed path by full clear not ideal — MVP just note
+        // full undo needs stroke list; for v1 we keep drawing (desktop-only undo later)
+      } else if (t === 'down') {
+        live.set(msg.id, {
+          points: [{ x: msg.x, y: msg.y }],
+          tool: msg.tool || 'pen',
+          color: msg.color|0,
+          width: msg.width|0,
+        });
+        drawPoly([{ x: msg.x, y: msg.y }], msg.tool, msg.color, msg.width);
+      } else if (t === 'move') {
+        const s = live.get(msg.id);
+        if (!s) return;
+        const p = { x: msg.x, y: msg.y };
+        const prev = s.points[s.points.length - 1];
+        s.points.push(p);
+        drawPoly([prev, p], s.tool, s.color, s.width);
+      } else if (t === 'up') {
+        live.delete(msg.id);
+      } else if (t === 'shape') {
+        ctx.strokeStyle = COLORS[msg.color|0] || '#111';
+        ctx.lineWidth = WIDTHS[msg.width|0] || 2;
+        const tool = msg.tool || 'rect';
+        const x0 = msg.x0, y0 = msg.y0, x1 = msg.x1, y1 = msg.y1;
+        ctx.beginPath();
+        if (tool === 'rect') {
+          ctx.strokeRect(Math.min(x0,x1), Math.min(y0,y1), Math.abs(x1-x0), Math.abs(y1-y0));
+        } else if (tool === 'circle' || tool === 'oval') {
+          const cx = (x0+x1)/2, cy = (y0+y1)/2, rx = Math.abs(x1-x0)/2, ry = Math.abs(y1-y0)/2;
+          ctx.ellipse(cx, cy, rx || 1, ry || 1, 0, 0, Math.PI*2);
+          ctx.stroke();
+        } else if (tool === 'line' || tool === 'arrow') {
+          ctx.moveTo(x0,y0); ctx.lineTo(x1,y1); ctx.stroke();
+        } else if (tool === 'tri') {
+          const ax = (x0+x1)/2;
+          ctx.moveTo(ax, y0); ctx.lineTo(x0, y1); ctx.lineTo(x1, y1); ctx.closePath(); ctx.stroke();
+        }
+      }
+    }
+
+    function connect() {
+      if (ws) { try { ws.close(); } catch (_) {} }
+      const url = document.getElementById('host').value.trim();
+      setStatus('connecting…');
+      ws = new WebSocket(url);
+      ws.onopen = () => setStatus('connected', true);
+      ws.onclose = () => setStatus('disconnected');
+      ws.onerror = () => setStatus('error');
+      ws.onmessage = (ev) => {
+        const lines = String(ev.data).split('\n').filter(Boolean);
+        for (const line of lines) {
+          try { handle(JSON.parse(line)); }
+          catch (e) { console.warn('bad frame', line, e); }
+        }
+      };
+    }
+
+    document.getElementById('btnConnect').onclick = connect;
+    document.getElementById('btnClear').onclick = clearPaper;
+    clearPaper();
+  </script>
+</body>
+</html>
