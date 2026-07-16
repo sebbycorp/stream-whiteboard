@@ -56,6 +56,55 @@ Requires **Python 3.9+** (stdlib only — no pip packages).
 
 ---
 
+## Desktop app (double-click, no terminal)
+
+A native macOS app lives in `desktop-app/` (Tauri). It talks TCP straight to the
+tablet — no `bridge.py`, no browser.
+
+### Build it (one-time)
+
+Prerequisites: Rust (`rustup`), Xcode Command Line Tools (`xcode-select --install`),
+and the Tauri CLI:
+
+```bash
+cargo install tauri-cli --version "^2.0" --locked
+```
+
+Generate the icon and build:
+
+```bash
+python3 tools/make_icon.py desktop-app/src-tauri/icon-src.png
+cd desktop-app/src-tauri
+cargo tauri icon icon-src.png
+cargo tauri build
+```
+
+The app is written to
+`desktop-app/src-tauri/target/release/bundle/macos/Stream Whiteboard.app`.
+Drag it to `/Applications`.
+
+### Use it
+
+1. First launch: right-click the app → **Open** → **Open** (one-time Gatekeeper
+   step, because the app is unsigned).
+2. Enter your tablet's IP and port, click **Apply**. The setting is remembered.
+3. Write on the tablet — ink appears live. It auto-reconnects if the link drops.
+
+USB mode: run `ssh -L 27182:127.0.0.1:27182 root@10.11.99.1`, then set the host to
+`127.0.0.1` in the app.
+
+### Test without the tablet
+
+```bash
+python3 tools/mock_tablet.py   # fake stream on :27182
+```
+
+Then set the app's host to `127.0.0.1` and Apply.
+
+The old `bridge.py` + browser flow still works and remains the zero-install fallback.
+
+---
+
 ## Layout
 
 ```
@@ -92,7 +141,7 @@ Full details: [PROTOCOL.md](./PROTOCOL.md).
 | Phase | Status |
 |-------|--------|
 | Browser viewer + Python bridge | ✅ MVP in this repo |
-| Installable Mac app (Tauri / SwiftUI) | 🔜 |
+| Installable Mac app (Tauri) | ✅ double-click app in `desktop-app/` |
 | Windows packaging | 🔜 |
 | PNG resync / AI bitmaps | 🔜 |
 | Meeting / OBS mode | 🔜 |
