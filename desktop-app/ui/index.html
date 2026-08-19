@@ -5,30 +5,54 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Stream Whiteboard</title>
   <style>
-    :root { --paper: #f7f6f2; --acc: #3d5a80; }
+    :root {
+      --paper: #ffffff;
+      --stage-bg: #e8e8ea;
+      --acc: #3d5a80;
+      --stage-pad: 12px;
+    }
     * { box-sizing: border-box; }
     html, body { height: 100%; }
     body {
       margin: 0; overflow: hidden;
       font: 13px/1.4 system-ui, -apple-system, Segoe UI, sans-serif;
-      background: #1a1a1a; color: #eee;
+      background: var(--stage-bg);
+      color: #222;
     }
 
-    /* Full-window drawing stage */
+    /* Full-window drawing stage — solid frame around the light board */
     #stage {
       position: fixed; inset: 0;
       display: flex; align-items: center; justify-content: center;
-      padding: 12px;
+      padding: var(--stage-pad);
+      background: var(--stage-bg);
     }
-    canvas {
+    /* Light board: clean white sheet under transparent ink canvas */
+    #sheet {
+      position: relative;
       display: block;
+      line-height: 0;
+      border-radius: 2px;
+      overflow: hidden;
       background: var(--paper);
-      box-shadow: 0 12px 40px rgba(0,0,0,.5);
-      border-radius: 4px;
+      /* Soft floating board — no heavy notebook chrome */
+      box-shadow:
+        0 0 0 1px rgba(0,0,0,.06),
+        0 8px 28px rgba(0,0,0,.18);
       transform-origin: center center;
-      transition: transform .18s ease;
+      transition: transform .18s ease, box-shadow .18s ease;
       touch-action: none;
     }
+    #sheet canvas {
+      display: block;
+      position: absolute;
+      inset: 0;
+      width: 100% !important;
+      height: 100% !important;
+      background: transparent;
+    }
+    #paper { z-index: 0; }
+    #c { z-index: 1; }
 
     /* Small floating menu button (top-left). Tints green when connected. */
     #menuBtn {
@@ -39,13 +63,22 @@
       font-size: 15px; line-height: 1; backdrop-filter: blur(6px);
     }
     #menuBtn.on { border-color: #7dcea0; box-shadow: 0 0 0 2px rgba(125,206,160,.25); }
+    #menuBtn.on::after {
+      content: "";
+      position: absolute;
+      top: 5px; right: 5px;
+      width: 8px; height: 8px;
+      border-radius: 50%;
+      background: #3dcc7a;
+      box-shadow: 0 0 0 2px rgba(61,204,122,.35);
+    }
     #menuBtn:hover { background: rgba(40,40,40,.85); }
 
     /* Collapsible control panel */
     #panel {
       position: fixed; top: 54px; left: 12px; z-index: 10;
       background: rgba(17,17,17,.92); border: 1px solid #333;
-      border-radius: 10px; padding: 12px; width: 260px;
+      border-radius: 10px; padding: 12px; width: 280px;
       box-shadow: 0 10px 30px rgba(0,0,0,.5); backdrop-filter: blur(8px);
     }
     #panel[hidden] { display: none; }
@@ -62,13 +95,102 @@
       border-radius: 6px; cursor: pointer; font-weight: 600;
     }
     #panel button.ghost { background: #333; }
+    #panel button.active { background: #2e7d32; }
+    #panel button.chroma.active { background: #1b5e20; }
+    #panel .hint { font-size: 11px; color: #777; width: 100%; }
+    #panel .sep {
+      width: 100%; height: 1px; background: #2a2a2a; margin: 4px 0 10px;
+    }
     #status { font-size: 12px; color: #aaa; }
     #status.on { color: #7dcea0; }
     #debug { font-size: 11px; color: #7c7c7c; }
+
+    /* Brief toast for mode changes / shortcuts */
+    #toast {
+      position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%);
+      z-index: 20; padding: 8px 14px; border-radius: 8px;
+      background: rgba(0,0,0,.78); color: #eee; font-size: 12px;
+      pointer-events: none; opacity: 0; transition: opacity .2s ease;
+      border: 1px solid #333;
+    }
+    #toast.show { opacity: 1; }
+
+    /* ── Meeting / OBS capture mode ─────────────────────────────────────── */
+    body.meeting {
+      background: var(--stage-bg);
+      --stage-pad: 0px;
+    }
+    body.meeting #stage {
+      background: var(--stage-bg);
+    }
+    body.meeting #menuBtn,
+    body.meeting #panel {
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity .15s ease;
+    }
+    /* Peek chrome when mouse is in the top-left corner (for tweaks mid-stream) */
+    body.meeting.chrome-peek #menuBtn,
+    body.meeting.chrome-peek #panel:not([hidden]) {
+      opacity: 1;
+      pointer-events: auto;
+    }
+    body.meeting #sheet {
+      box-shadow: none;
+      border-radius: 0;
+      /* Edge-to-edge board for capture */
+    }
+    /* OBS preset: stage matches paper so window capture is solid (no gray frame) */
+    body.obs {
+      background: var(--paper);
+      --stage-bg: var(--paper);
+      --stage-pad: 0px;
+    }
+    body.obs #stage { background: var(--paper); }
+    body.obs #sheet {
+      box-shadow: none;
+      border-radius: 0;
+    }
+
+    /* Dark board: a black sheet on a dark stage needs a light hairline edge —
+       the default dark drop-shadow would make the board edge invisible. */
+    body.dark #sheet {
+      box-shadow:
+        0 0 0 1px rgba(255,255,255,.10),
+        0 8px 28px rgba(0,0,0,.55);
+    }
+    body.dark.meeting #sheet,
+    body.dark.obs #sheet { box-shadow: none; }
+
+    /* ── Overlay mode: genuinely transparent window ──────────────────────
+       No paper, no frame, no shadow — only ink floats over whatever is
+       behind the window. Requires transparent:true + macOSPrivateApi. */
+    body.transparent,
+    body.transparent #stage {
+      background: transparent;
+    }
+    body.transparent { --stage-bg: transparent; --paper: transparent; }
+    body.transparent #sheet {
+      background: transparent;
+      box-shadow: none;
+      border-radius: 0;
+    }
+    /* Click-through: the whole window ignores the cursor. Badge stays visible
+       so the mode is never invisible-and-forgotten. */
+    #ctBadge {
+      position: fixed; top: 12px; right: 12px; z-index: 30;
+      display: none; align-items: center; gap: 6px;
+      padding: 6px 10px; border-radius: 8px;
+      background: rgba(190,60,60,.92); color: #fff;
+      font-size: 11px; font-weight: 600; letter-spacing: .02em;
+      border: 1px solid rgba(255,255,255,.25);
+      pointer-events: none;
+    }
+    body.clickthrough #ctBadge { display: flex; }
   </style>
 </head>
 <body>
-  <button id="menuBtn" title="Show / hide controls">☰</button>
+  <button id="menuBtn" title="Show / hide controls (M = meeting · O = OBS)">☰</button>
   <div id="panel" hidden>
     <div class="row">
       <input id="host" title="Tablet IP" placeholder="tablet IP" />
@@ -76,60 +198,335 @@
       <button id="btnApply">Apply</button>
     </div>
     <div class="row">
-      <button id="btnClear" class="ghost">Clear</button>
-      <button id="btnRotate" class="ghost">Rotate 90°</button>
+      <button id="btnClear" class="ghost" title="Clear board on tablet + app (⌘⌫ · auto-saves PNG)">Clear</button>
+      <button id="btnUndo" class="ghost" title="Undo last stroke on tablet + app (⌘Z)">Undo</button>
+      <button id="btnRotate" class="ghost" title="Rotate the view 90° (R) — app-side only; the tablet has no rotate">Rotate</button>
     </div>
+    <div class="row">
+      <button id="btnSave" class="ghost" title="Save PNG (⌘S)">Save</button>
+      <button id="btnCopy" class="ghost" title="Copy image (⌘C)">Copy</button>
+      <button id="btnExports" class="ghost" title="Open export folder">Folder</button>
+    </div>
+    <div class="sep"></div>
+    <div class="row">
+      <button id="btnObs" class="ghost" title="OBS preset: fixed size, pin, hide chrome (O)">OBS</button>
+      <button id="btnMeeting" class="ghost" title="Hide chrome for capture (M)">Meeting</button>
+      <button id="btnPin" class="ghost" title="Always on top (P)">Pin</button>
+    </div>
+    <div class="row">
+      <button id="btnDark" class="ghost" title="Black board, light ink (D)">Dark</button>
+      <button id="btnOverlay" class="ghost" title="Transparent overlay — ink floats over your screen (T)">Overlay</button>
+      <button id="btnClickThru" class="ghost" title="Let clicks pass through to the app underneath (I)">Click-thru</button>
+      <button id="btnChroma" class="ghost chroma" title="Green paper for chroma key (G)">Chroma</button>
+      <button id="btnFullscreen" class="ghost" title="Fullscreen (F)">Full</button>
+    </div>
+    <div class="row"><span class="hint">⌘S save · ⌘C copy · ⌘Z undo · ⌘⌫ clear · R rotate · O OBS · M meeting · G chroma · D dark · T overlay · I click-thru</span></div>
     <div class="row"><span id="status">starting…</span></div>
     <div class="row"><span id="debug">page —×—</span></div>
   </div>
+  <div id="ctBadge">CLICK-THROUGH · ⌘-Tab back, press I</div>
+  <div id="toast" role="status"></div>
 
   <div id="stage">
-    <canvas id="c" width="1404" height="1872"></canvas>
+    <div id="sheet">
+      <canvas id="paper" width="1404" height="1604"></canvas>
+      <canvas id="c" width="1404" height="1604"></canvas>
+    </div>
   </div>
 
   <script>
     const { invoke } = window.__TAURI__.core;
     const { listen } = window.__TAURI__.event;
+    const twin = (window.__TAURI__ && window.__TAURI__.window) || {};
 
-    // Palette indexed by the tablet's color id. Order is a best guess for the
-    // reMarkable palette; the debug line shows the incoming index (e.g. "c3") so
-    // it can be calibrated to your device exactly.
+    // Ink palettes indexed by the tablet's color id.
+    // NOTE: the reMarkable is grayscale and the diary build hardcodes color=0 on
+    // every down/shape, so in practice only index 0 is ever used. The rest of the
+    // table is kept so a future colour-capable tablet build just works.
     // 0:black 1:gray 2:lightgray 3:blue 4:red 5:green 6:yellow 7:white 8:purple
-    const COLORS = ['#111', '#555', '#9a9a9a', '#2b6cb0', '#c0392b', '#2e7d32', '#e0a800', '#efefef', '#6a4bbf'];
-    const WIDTHS = [1.5, 2.5, 4.5];
-    const SMOOTH = 0.6; // input low-pass (0..1): lower = smoother, slightly more lag
+    const COLORS_LIGHT = ['#111', '#555', '#9a9a9a', '#2b6cb0', '#c0392b', '#2e7d32', '#e0a800', '#efefef', '#6a4bbf'];
+    // Dark-board variants: luminance-flipped so ink stays legible on black paper.
+    const COLORS_DARK = ['#f4f4f6', '#c9c9cf', '#8e8e96', '#6fb3ff', '#ff7f6e', '#7fdc95', '#ffd24a', '#2a2a2e', '#c3a8ff'];
+    // Tablet width 0/1/2 → S/M/L. Tuned thicker for stream readability.
+    const WIDTHS = [3.4, 5.2, 8.0];
+    // Light EMA only — heavy filters + pen-up reshape made strokes look worse.
+    // Higher = follows the pen more tightly (less lag, slightly more jitter).
+    const SMOOTH = 0.82;
+    // Skip only true duplicates; never freeze the tip.
+    const MIN_DIST2 = 0.09;
 
     const canvas = document.getElementById('c');
-    const ctx = canvas.getContext('2d');
+    // desynchronized: let the browser composite without forcing main-thread stalls
+    const ctx = canvas.getContext('2d', { alpha: true, desynchronized: true }) || canvas.getContext('2d');
+    const paperCanvas = document.getElementById('paper');
+    const paperCtx = paperCanvas.getContext('2d');
+    const sheet = document.getElementById('sheet');
     const stage = document.getElementById('stage');
-    const twin = window.__TAURI__.window; // window API (getCurrentWindow, LogicalSize)
-    let pageW = 1404, pageH = 1872;
-    let viewRotation = 0; // 0 or 90 — manual view rotation on top of the tablet's orientation
-    let lastOrient = null; // 'port' | 'land' — tracks the tablet's current orientation
-    let live = new Map(); // id -> {points, tool, color, width}
-
-    // Resize the app window to match the tablet's orientation + aspect, so a
-    // landscape toggle on the tablet flips the whole app to landscape too.
-    async function resizeWindowToPage() {
-      if (!twin || !twin.getCurrentWindow || !twin.LogicalSize) return;
-      const LONG = 1200;
-      let ww, wh;
-      if (pageW >= pageH) { ww = LONG; wh = Math.round(LONG * pageH / pageW); }
-      else { wh = LONG; ww = Math.round(LONG * pageW / pageH); }
-      try { await twin.getCurrentWindow().setSize(new twin.LogicalSize(ww, wh)); }
-      catch (err) { console.warn('setSize failed (window stays put, canvas still fits)', err); }
-    }
-
-    // ── UI: menu + status ────────────────────────────────────────────────
     const menuBtn = document.getElementById('menuBtn');
     const panel = document.getElementById('panel');
+    const toastEl = document.getElementById('toast');
+
+    // Paper colors (stream / OBS friendly)
+    const PAPER_WHITE = '#ffffff';
+    const PAPER_DARK = '#0d0d0f';   // near-black: reads as black, no banding on stream
+    const PAPER_CHROMA = '#00b140'; // broadcast green — keys cleanly in OBS
+    // Stage = the frame around the sheet when not edge-to-edge (OBS/meeting).
+    const STAGE_LIGHT = '#e8e8ea';
+    const STAGE_DARK = '#161619';
+    const DARK_KEY = 'sw.darkBoard';
+    const ROT_KEY = 'sw.viewRotation';
+    // OBS preset window size (portrait 3:4 @ 1080 tall — stable for Window Capture)
+    const OBS_W = 810;
+    const OBS_H = 1080;
+
+    let pageW = 1404, pageH = 1604; // writing band (tablet minus top/footer chrome)
+    let viewRotation = 0; // emergency local flip only (prefer tablet landscape sync)
+    let lastOrient = null; // 'port' | 'land'
+    let lastPage = null;   // last tablet page index (null = never connected)
+    let tabletLinked = false; // true after first successful status connected
+    let meetingMode = false;
+    let obsMode = false;
+    let chromaOn = false;
+    let darkMode = false;
+    let transparentMode = false;
+    let clickThrough = false;
+    let alwaysOnTop = false;
+    let isFullscreen = false;
+    let redrawPending = false;
+    let paperColor = PAPER_WHITE;
+
+    // Retained scene: finished strokes/shapes. Live strokes sit in `live` until pen-up.
+    // kind: 'path' | 'shape'
+    let strokes = [];
+    let live = new Map(); // id -> path stroke
+
+    // ── Toast ────────────────────────────────────────────────────────────
+    let toastTimer = null;
+    function toast(msg, ms = 1800) {
+      toastEl.textContent = msg;
+      toastEl.classList.add('show');
+      clearTimeout(toastTimer);
+      toastTimer = setTimeout(() => toastEl.classList.remove('show'), ms);
+    }
+
+    // ── Window helpers ───────────────────────────────────────────────────
+    function currentWindow() {
+      try { return twin && twin.getCurrentWindow ? twin.getCurrentWindow() : null; }
+      catch (_) { return null; }
+    }
+
+    async function resizeWindowToPage() {
+      // Freeze auto-resize in meeting/OBS so capture framing stays stable.
+      if (meetingMode || obsMode) return;
+      const win = currentWindow();
+      if (!win || !twin.LogicalSize) return;
+      const LONG = 1200;
+      const rotated = (viewRotation % 180) !== 0;
+      const w = rotated ? pageH : pageW;
+      const h = rotated ? pageW : pageH;
+      let ww, wh;
+      if (w >= h) { ww = LONG; wh = Math.round(LONG * h / w); }
+      else { wh = LONG; ww = Math.round(LONG * w / h); }
+      try { await win.setSize(new twin.LogicalSize(ww, wh)); }
+      catch (err) { console.warn('setSize failed', err); }
+    }
+
+    async function setWindowResizable(on) {
+      const win = currentWindow();
+      if (!win || !win.setResizable) return;
+      try { await win.setResizable(!!on); }
+      catch (err) { console.warn('setResizable failed', err); }
+    }
+
+    async function setAlwaysOnTop(on) {
+      alwaysOnTop = !!on;
+      document.getElementById('btnPin').classList.toggle('active', alwaysOnTop);
+      const win = currentWindow();
+      if (!win || !win.setAlwaysOnTop) return;
+      try { await win.setAlwaysOnTop(alwaysOnTop); }
+      catch (err) { console.warn('setAlwaysOnTop failed', err); }
+    }
+
+    async function setFullscreen(on) {
+      isFullscreen = !!on;
+      document.getElementById('btnFullscreen').classList.toggle('active', isFullscreen);
+      const win = currentWindow();
+      if (!win || !win.setFullscreen) return;
+      try { await win.setFullscreen(isFullscreen); }
+      catch (err) { console.warn('setFullscreen failed', err); }
+    }
+
+    function applyPaperColor(color) {
+      paperColor = color;
+      document.documentElement.style.setProperty('--paper', paperColor);
+      if (obsMode) {
+        document.documentElement.style.setProperty('--stage-bg', paperColor);
+      }
+      paintPaperTexture();
+    }
+
+    /** Paper colour resolved from the mode flags. Chroma wins (it's a keying
+     *  requirement), then dark, else white. */
+    function currentPaper() {
+      if (transparentMode) return 'transparent';
+      if (chromaOn) return PAPER_CHROMA;
+      return darkMode ? PAPER_DARK : PAPER_WHITE;
+    }
+
+    /** Frame colour behind the sheet outside OBS/meeting edge-to-edge mode. */
+    function currentStage() {
+      if (transparentMode) return 'transparent';
+      return darkMode ? STAGE_DARK : STAGE_LIGHT;
+    }
+
+    /** Re-apply paper + stage and repaint ink (the palette depends on darkMode). */
+    function refreshBoardColors() {
+      applyPaperColor(currentPaper());
+      if (!obsMode) {
+        document.documentElement.style.setProperty('--stage-bg', currentStage());
+      }
+      requestRedraw();
+    }
+
+    function setChroma(on) {
+      chromaOn = !!on;
+      document.getElementById('btnChroma').classList.toggle('active', chromaOn);
+      refreshBoardColors();
+      if (chromaOn) toast('Chroma paper · key #00B140 in OBS');
+      else toast(darkMode ? 'Dark board · light ink' : 'White paper');
+    }
+
+    /**
+     * Overlay mode: a genuinely transparent window — ink floats over whatever
+     * is behind it (slides, browser, desktop). Needs `transparent: true` +
+     * `macOSPrivateApi: true` in tauri.conf.json; in a plain browser it just
+     * shows the page background.
+     *
+     * Kept separate from chroma on purpose: if a capture pipeline flattens the
+     * alpha away, chroma remains the working fallback.
+     */
+    async function setTransparent(on, opts) {
+      transparentMode = !!on;
+      document.body.classList.toggle('transparent', transparentMode);
+      document.getElementById('btnOverlay').classList.toggle('active', transparentMode);
+      if (transparentMode) {
+        // Overlay is useless behind other windows.
+        if (!alwaysOnTop) await setAlwaysOnTop(true);
+        await setMeetingMode(true, { quiet: true });
+      } else {
+        await setClickThrough(false, { quiet: true });
+        if (!obsMode) await setMeetingMode(false, { quiet: true });
+      }
+      refreshBoardColors();
+      if (opts && opts.quiet) return;
+      toast(transparentMode
+        ? 'Overlay · transparent window · I = click-through · Esc to exit'
+        : 'Overlay off');
+    }
+
+    /**
+     * Let mouse clicks pass through to the app underneath. The window still
+     * receives KEYBOARD events whenever it is focused, so the escape route is
+     * ⌘-Tab back to Stream Whiteboard and press I (or Esc). The red badge keeps
+     * the mode from being invisible-and-forgotten.
+     */
+    async function setClickThrough(on, opts) {
+      const want = !!on && transparentMode; // only meaningful over a transparent window
+      clickThrough = want;
+      document.body.classList.toggle('clickthrough', clickThrough);
+      document.getElementById('btnClickThru').classList.toggle('active', clickThrough);
+      const win = currentWindow();
+      if (win && win.setIgnoreCursorEvents) {
+        try { await win.setIgnoreCursorEvents(clickThrough); }
+        catch (err) { console.warn('setIgnoreCursorEvents failed', err); }
+      }
+      if (opts && opts.quiet) return;
+      if (clickThrough) toast('Click-through ON · ⌘-Tab back and press I or Esc to regain clicks');
+      else if (on && !transparentMode) toast('Click-through needs overlay mode (T)');
+      else toast('Click-through off');
+    }
+
+    function setDark(on, opts) {
+      darkMode = !!on;
+      document.body.classList.toggle('dark', darkMode);
+      document.getElementById('btnDark').classList.toggle('active', darkMode);
+      try { localStorage.setItem(DARK_KEY, darkMode ? '1' : '0'); } catch (err) { /* private mode */ }
+      refreshBoardColors();
+      if (opts && opts.quiet) return;
+      if (chromaOn) toast(darkMode ? 'Dark ink palette · chroma paper still on' : 'Light ink palette · chroma paper still on');
+      else toast(darkMode ? 'Dark board · light ink' : 'White board · dark ink');
+    }
+
+    async function setMeetingMode(on, opts) {
+      const quiet = opts && opts.quiet;
+      meetingMode = !!on;
+      document.body.classList.toggle('meeting', meetingMode);
+      document.getElementById('btnMeeting').classList.toggle('active', meetingMode);
+      if (meetingMode) {
+        panel.hidden = true;
+        // Pin on by default in meeting mode (great for dual-monitor presenting);
+        // user can still toggle P. Fullscreen left optional (OBS often captures window).
+        if (!alwaysOnTop) await setAlwaysOnTop(true);
+        if (!quiet) toast('Meeting mode · Esc to exit · move cursor top-left for menu');
+      } else {
+        document.body.classList.remove('chrome-peek');
+        // Leaving meeting without OBS: restore normal stage bg
+        if (!obsMode) {
+          document.documentElement.style.setProperty('--stage-bg', currentStage());
+          if (!quiet) toast('Meeting mode off');
+        }
+      }
+      fitCanvas();
+    }
+
+    /**
+     * OBS preset: fixed 810×1080 window, edge-to-edge paper (no gray frame),
+     * meeting chrome hidden, always-on-top, non-resizable.
+     */
+    async function setObsMode(on) {
+      obsMode = !!on;
+      document.body.classList.toggle('obs', obsMode);
+      document.getElementById('btnObs').classList.toggle('active', obsMode);
+
+      if (obsMode) {
+        if (isFullscreen) await setFullscreen(false);
+        document.documentElement.style.setProperty('--stage-bg', paperColor);
+        await setMeetingMode(true, { quiet: true });
+        if (!alwaysOnTop) await setAlwaysOnTop(true);
+        await setWindowResizable(false);
+        const win = currentWindow();
+        if (win && twin.LogicalSize) {
+          try { await win.setSize(new twin.LogicalSize(OBS_W, OBS_H)); }
+          catch (err) { console.warn('OBS setSize failed', err); }
+        }
+        fitCanvas();
+        toast(chromaOn
+          ? 'OBS ready · 810×1080 · chroma · Esc to exit'
+          : 'OBS ready · 810×1080 · window capture · Esc / O to exit');
+      } else {
+        await setWindowResizable(true);
+        document.documentElement.style.setProperty('--stage-bg', currentStage());
+        if (meetingMode) await setMeetingMode(false, { quiet: true });
+        toast('OBS mode off');
+        await resizeWindowToPage();
+        fitCanvas();
+      }
+    }
+
+    // Peek controls in meeting mode when cursor is near top-left.
+    document.addEventListener('mousemove', (e) => {
+      if (!meetingMode) return;
+      const peek = e.clientX < 72 && e.clientY < 72;
+      document.body.classList.toggle('chrome-peek', peek);
+      if (peek) panel.hidden = false;
+    });
+
+    // ── UI: menu + status ────────────────────────────────────────────────
     function setStatus(t, on) {
       const el = document.getElementById('status');
       if (el) { el.textContent = t; el.classList.toggle('on', !!on); }
-      menuBtn.classList.toggle('on', !!on); // button glows green when connected
+      menuBtn.classList.toggle('on', !!on);
     }
-    // Observed coordinate extents from the tablet — reveals whether strokes fall
-    // outside the reported page size (which would clip the corners).
     let bbox = { minx: Infinity, miny: Infinity, maxx: -Infinity, maxy: -Infinity };
     function resetBBox() { bbox = { minx: Infinity, miny: Infinity, maxx: -Infinity, maxy: -Infinity }; }
     function recordCoord(x, y) {
@@ -145,114 +542,437 @@
       const b = isFinite(bbox.minx)
         ? `x[${bbox.minx|0}..${bbox.maxx|0}] y[${bbox.miny|0}..${bbox.maxy|0}]`
         : 'x[—] y[—]';
-      el.textContent = `page ${pageW}×${pageH} · seen ${b} · last: ${setDebug._last || '—'}`;
+      el.textContent = `page ${pageW}×${pageH} · ${strokes.length} strokes · seen ${b} · last: ${setDebug._last || '—'}`;
     }
 
-    // ── Sizing: fit the page to the window in either orientation ──────────
+    // ── Sizing ───────────────────────────────────────────────────────────
     function fitCanvas() {
-      const availW = stage.clientWidth - 24;
-      const availH = stage.clientHeight - 24;
+      const pad = (meetingMode || obsMode) ? 0 : 24;
+      const availW = stage.clientWidth - pad;
+      const availH = stage.clientHeight - pad;
       const rotated = (viewRotation % 180) !== 0;
       const cw = canvas.width, ch = canvas.height;
-      // footprint after CSS rotation (swap w/h when rotated 90°)
       const fpW = rotated ? ch : cw;
       const fpH = rotated ? cw : ch;
       const scale = Math.min(availW / fpW, availH / fpH);
-      canvas.style.width = (cw * scale) + 'px';
-      canvas.style.height = (ch * scale) + 'px';
-      canvas.style.transform = `rotate(${viewRotation}deg)`;
+      // Size the sheet wrapper; both canvases fill it via CSS.
+      sheet.style.width = (cw * scale) + 'px';
+      sheet.style.height = (ch * scale) + 'px';
+      sheet.style.transform = `rotate(${viewRotation}deg)`;
     }
 
-    // ── Rendering (smoothed live ink) ─────────────────────────────────────
-    function clearPaper() {
-      ctx.fillStyle = '#f7f6f2';
-      ctx.fillRect(0, 0, canvas.width, canvas.height);
-      live.clear();
+    function setPageSize(w, h) {
+      pageW = w; pageH = h;
+      canvas.width = w; canvas.height = h;
+      paperCanvas.width = w; paperCanvas.height = h;
+      paintPaperTexture();
     }
+
+    /** Flat paper fill — white or chroma green. */
+    function paintPaperTexture() {
+      const w = paperCanvas.width, h = paperCanvas.height;
+      const p = paperCtx;
+      p.globalCompositeOperation = 'source-over';
+      if (transparentMode) {
+        // Overlay mode: no paper at all, so the desktop shows through.
+        p.clearRect(0, 0, w, h);
+        return;
+      }
+      p.fillStyle = paperColor;
+      p.fillRect(0, 0, w, h);
+    }
+
+    // ── Export: composite paper + ink → PNG ──────────────────────────────
+    function compositeBoard() {
+      // Ensure live ink is fully painted before capture.
+      redrawAll();
+      const rotated = (viewRotation % 180) !== 0;
+      const out = document.createElement('canvas');
+      out.width = rotated ? canvas.height : canvas.width;
+      out.height = rotated ? canvas.width : canvas.height;
+      const g = out.getContext('2d');
+      g.fillStyle = paperColor;
+      g.fillRect(0, 0, out.width, out.height);
+      if (viewRotation) {
+        // Bake the view rotation in so a saved PNG matches what's on screen.
+        g.translate(out.width / 2, out.height / 2);
+        g.rotate(viewRotation * Math.PI / 180);
+        g.translate(-canvas.width / 2, -canvas.height / 2);
+      }
+      g.drawImage(paperCanvas, 0, 0);
+      g.drawImage(canvas, 0, 0);
+      return out;
+    }
+
+    function boardHasInk() {
+      return strokes.length > 0 || live.size > 0;
+    }
+
+    async function savePng(label) {
+      try {
+        const dataUrl = compositeBoard().toDataURL('image/png');
+        const b64 = dataUrl.split(',')[1] || '';
+        if (!b64) throw new Error('empty png');
+        const path = await invoke('save_png', {
+          pngBase64: b64,
+          label: label || 'board',
+        });
+        const short = String(path).split('/').pop();
+        toast(`Saved ${short}`);
+        return path;
+      } catch (err) {
+        console.warn('save failed', err);
+        toast('Save failed');
+        return null;
+      }
+    }
+
+    async function copyBoard() {
+      try {
+        const blob = await new Promise((resolve, reject) => {
+          compositeBoard().toBlob((b) => (b ? resolve(b) : reject(new Error('toBlob failed'))), 'image/png');
+        });
+        if (navigator.clipboard && window.ClipboardItem) {
+          await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })]);
+          toast('Copied to clipboard');
+          return;
+        }
+        // Fallback: still save so the user gets something.
+        await savePng('clipboard-fallback');
+        toast('Clipboard unavailable · saved PNG instead');
+      } catch (err) {
+        console.warn('copy failed', err);
+        // Some WebViews reject image clipboard — fall back to file.
+        const path = await savePng('copy');
+        toast(path ? 'Copy blocked · saved PNG instead' : 'Copy failed');
+      }
+    }
+
+    async function openExports() {
+      try {
+        const path = await invoke('open_export_dir');
+        toast(`Exports · ${path}`);
+      } catch (err) {
+        console.warn('open export dir', err);
+        toast('Could not open export folder');
+      }
+    }
+
+    /** Snapshot if there is ink, then clear. Used by Clear button + tablet clear. */
+    async function clearWithSnapshot(label) {
+      if (boardHasInk()) {
+        await savePng(label || 'auto-clear');
+      }
+      clearScene();
+      resetBBox();
+      setDebug('clear');
+    }
+
+    // ── Tool helpers ─────────────────────────────────────────────────────
     function isErase(tool) { return !!tool && (String(tool).indexOf('eras') === 0 || tool === 'rubber'); }
     function isHighlight(tool) { return tool === 'hl' || tool === 'highlighter' || tool === 'marker'; }
     function toolWidth(tool, w) {
-      if (isHighlight(tool)) return 16;
-      if (isErase(tool)) return 30;
-      return WIDTHS[Math.min(2, Math.max(0, w | 0))] || 2.5;
+      if (isHighlight(tool)) return 26;
+      if (isErase(tool)) return 48;
+      return WIDTHS[Math.min(2, Math.max(0, w | 0))] || 5.2;
     }
     function strokeStyle(tool, color) {
-      if (isErase(tool)) return '#f7f6f2';
-      if (isHighlight(tool)) return 'rgba(200,200,120,0.35)';
-      return COLORS[color | 0] || '#111';
+      // Erase draws with destination-out, so its colour is irrelevant — the
+      // paper below shows through whatever the board colour is.
+      if (isErase(tool)) return '#000';
+      if (isHighlight(tool)) {
+        return darkMode ? 'rgba(255, 214, 64, 0.30)' : 'rgba(235, 205, 70, 0.42)';
+      }
+      const table = darkMode ? COLORS_DARK : COLORS_LIGHT;
+      return table[color | 0] || table[0];
     }
-    function mid(a, b) { return { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 }; }
-    function beginStrokeStyle(s) {
-      ctx.lineCap = 'round';
-      ctx.lineJoin = 'round';
-      ctx.strokeStyle = strokeStyle(s.tool, s.color);
-      ctx.lineWidth = toolWidth(s.tool, s.width);
+
+    function beginStrokeStyle(g, s) {
+      g.lineCap = 'round';
+      g.lineJoin = 'round';
+      g.strokeStyle = strokeStyle(s.tool, s.color);
+      g.lineWidth = toolWidth(s.tool, s.width);
+      g.globalCompositeOperation = isErase(s.tool) ? 'destination-out' : 'source-over';
     }
-    // Draw the newest smooth segment incrementally: a quadratic curve between
-    // consecutive midpoints (control = shared point). Points are pre-smoothed
-    // with a low-pass on input, so coalesced ~40 Hz samples render as silky
-    // curves with no added latency.
-    function drawTail(s) {
-      const p = s.points, n = p.length;
-      beginStrokeStyle(s);
+    function endStrokeStyle(g) {
+      g.globalCompositeOperation = 'source-over';
+    }
+
+    // ── Ink: light EMA + continuous quadratic midpoints ──────────────────
+    // Live and committed use the *same* path builder. On every sample we
+    // rebuild the full scene (rAF-coalesced) so there are no incremental
+    // seams and no “pop” when the pen lifts.
+
+    function pushLivePoint(s, x, y) {
+      const prev = s.points[s.points.length - 1];
+      if (!prev) {
+        s.points.push({ x, y });
+        return;
+      }
+      const nx = prev.x + (x - prev.x) * SMOOTH;
+      const ny = prev.y + (y - prev.y) * SMOOTH;
+      const dx = nx - prev.x, dy = ny - prev.y;
+      if (dx * dx + dy * dy < MIN_DIST2) {
+        // Nudge tip in place (slow writing) — still triggers a redraw.
+        prev.x = nx;
+        prev.y = ny;
+        return;
+      }
+      s.points.push({ x: nx, y: ny });
+    }
+
+    /**
+     * Classic freehand smoother: quadratic curves through segment midpoints.
+     * One continuous stroke() — no per-segment width changes, no pen-up reshape.
+     */
+    function traceSmoothPath(g, points) {
+      const n = points.length;
+      if (n === 0) return;
       if (n === 1) {
-        ctx.beginPath();
-        ctx.arc(p[0].x, p[0].y, ctx.lineWidth / 2, 0, Math.PI * 2);
-        ctx.fillStyle = ctx.strokeStyle;
-        ctx.fill();
+        g.moveTo(points[0].x, points[0].y);
         return;
       }
       if (n === 2) {
-        ctx.beginPath();
-        ctx.moveTo(p[0].x, p[0].y);
-        ctx.lineTo(p[1].x, p[1].y);
-        ctx.stroke();
+        g.moveTo(points[0].x, points[0].y);
+        g.lineTo(points[1].x, points[1].y);
         return;
       }
-      const a = p[n - 3], b = p[n - 2], c = p[n - 1];
-      const m1 = mid(a, b), m2 = mid(b, c);
-      ctx.beginPath();
-      ctx.moveTo(m1.x, m1.y);
-      ctx.quadraticCurveTo(b.x, b.y, m2.x, m2.y);
-      ctx.stroke();
-    }
-    function finishStroke(s) {
-      const p = s.points, n = p.length;
-      if (n < 2) return;
-      beginStrokeStyle(s);
-      const m = mid(p[n - 2], p[n - 1]);
-      ctx.beginPath();
-      ctx.moveTo(m.x, m.y);
-      ctx.lineTo(p[n - 1].x, p[n - 1].y);
-      ctx.stroke();
+      g.moveTo(points[0].x, points[0].y);
+      // First half-segment into the first midpoint.
+      g.lineTo(
+        (points[0].x + points[1].x) / 2,
+        (points[0].y + points[1].y) / 2
+      );
+      for (let i = 1; i < n - 1; i++) {
+        const xc = (points[i].x + points[i + 1].x) / 2;
+        const yc = (points[i].y + points[i + 1].y) / 2;
+        g.quadraticCurveTo(points[i].x, points[i].y, xc, yc);
+      }
+      // Cap at the real tip so the cursor feels attached to the pen.
+      const last = points[n - 1];
+      g.lineTo(last.x, last.y);
     }
 
+    function drawPathStroke(s, g) {
+      g = g || ctx;
+      const p = s.points;
+      if (!p || !p.length) return;
+      beginStrokeStyle(g, s);
+      if (p.length === 1) {
+        g.beginPath();
+        g.arc(p[0].x, p[0].y, g.lineWidth / 2, 0, Math.PI * 2);
+        g.fillStyle = g.strokeStyle;
+        g.fill();
+        endStrokeStyle(g);
+        return;
+      }
+      g.beginPath();
+      traceSmoothPath(g, p);
+      g.stroke();
+      endStrokeStyle(g);
+    }
+
+    function drawShapeStroke(s, g) {
+      g = g || ctx;
+      beginStrokeStyle(g, s);
+      const { tool, x0, y0, x1, y1 } = s;
+      g.beginPath();
+      if (tool === 'rect') {
+        g.strokeRect(Math.min(x0, x1), Math.min(y0, y1), Math.abs(x1 - x0), Math.abs(y1 - y0));
+      } else if (tool === 'circle' || tool === 'oval') {
+        const cx = (x0 + x1) / 2, cy = (y0 + y1) / 2;
+        const rx = Math.abs(x1 - x0) / 2 || 1, ry = Math.abs(y1 - y0) / 2 || 1;
+        g.ellipse(cx, cy, rx, ry, 0, 0, Math.PI * 2);
+        g.stroke();
+      } else if (tool === 'line' || tool === 'arrow') {
+        g.moveTo(x0, y0); g.lineTo(x1, y1); g.stroke();
+      } else if (tool === 'tri') {
+        const ax = (x0 + x1) / 2;
+        g.moveTo(ax, y0); g.lineTo(x0, y1); g.lineTo(x1, y1); g.closePath(); g.stroke();
+      } else {
+        g.moveTo(x0, y0); g.lineTo(x1, y1); g.stroke();
+      }
+      endStrokeStyle(g);
+    }
+
+    function drawStroke(s, g) {
+      if (s.kind === 'shape') drawShapeStroke(s, g);
+      else drawPathStroke(s, g);
+    }
+
+    function clearInk() {
+      ctx.globalCompositeOperation = 'source-over';
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+    }
+
+    function redrawAll() {
+      clearInk();
+      for (const s of strokes) drawStroke(s);
+      for (const s of live.values()) drawPathStroke(s);
+    }
+
+    /** Coalesce many tablet samples into one paint per animation frame. */
+    function requestRedraw() {
+      if (redrawPending) return;
+      redrawPending = true;
+      requestAnimationFrame(() => {
+        redrawPending = false;
+        redrawAll();
+      });
+    }
+
+    function clearScene() {
+      strokes = [];
+      live.clear();
+      clearInk();
+    }
+
+    function undoLast() {
+      // Drop any in-flight stroke first (pen still down / orphaned live).
+      if (live.size) {
+        live.clear();
+        redrawAll();
+        setDebug('undo-live');
+        return true;
+      }
+      if (!strokes.length) return false;
+      strokes.pop();
+      redrawAll();
+      setDebug('undo');
+      return true;
+    }
+
+    /**
+     * Ask the tablet to apply an action. Tablet is source of truth: it performs
+     * the change and rebroadcasts clear/undo/hello, which update this viewer.
+     * If offline, apply locally so the buttons still work.
+     */
+    async function tabletCmd(cmd, localFallback) {
+      try {
+        await invoke('tablet_cmd', { cmd });
+        return true;
+      } catch (err) {
+        console.warn('tablet_cmd', cmd, err);
+        if (typeof localFallback === 'function') {
+          localFallback();
+          toast(`${cmd} · local only (tablet offline)`);
+        } else {
+          toast(`Not connected · can't ${cmd}`);
+        }
+        return false;
+      }
+    }
+
+    async function requestClear() {
+      // Snapshot first (whether tablet or local).
+      if (boardHasInk()) await savePng('clear');
+      const ok = await tabletCmd('clear', () => {
+        clearScene();
+        resetBBox();
+        setDebug('clear-local');
+      });
+      if (ok) {
+        // Optimistic wipe so the tablet's clear echo doesn't re-snapshot.
+        clearScene();
+        resetBBox();
+        setDebug('clear');
+        toast('Clear → tablet');
+      }
+    }
+
+    async function requestUndo() {
+      const ok = await tabletCmd('undo', () => {
+        if (!undoLast()) toast('Nothing to undo');
+      });
+      if (ok) { /* wait for stream undo echo */ }
+    }
+
+    /**
+     * Rotate the VIEW only.
+     *
+     * The tablet has no rotate feature to sync with: its framebuffer is fixed
+     * portrait (`canvas_w()` is just `vinfo.xres`), `diary.c` contains no
+     * orientation code, and `stream.c` discards desktop→tablet bytes without
+     * parsing them. Sending a `rotate` cmd looked like it worked only because
+     * a socket write succeeds whether or not anyone reads it.
+     *
+     * So this turns the Mac view instead — which is what you actually want when
+     * you physically turn the reMarkable and write along its long edge: the
+     * tablet keeps streaming portrait coordinates and the app stands them up.
+     */
+    async function requestRotate() {
+      viewRotation = (viewRotation + 90) % 360;
+      try { localStorage.setItem(ROT_KEY, String(viewRotation)); } catch (err) { /* private mode */ }
+      await resizeWindowToPage();
+      fitCanvas();
+      setDebug('rotate');
+      toast(viewRotation === 0 ? 'Upright' : `Rotated ${viewRotation}°`);
+    }
+
+    // ── Protocol handler ─────────────────────────────────────────────────
     function handle(msg) {
       const t = msg.t;
       if (t === 'hello') {
-        pageW = msg.w || 1404; pageH = msg.h || 1872;
-        canvas.width = pageW; canvas.height = pageH; // resize + clears bitmap
-        clearPaper();
-        resetBBox();
+        const newW = msg.w || 1404, newH = msg.h || 1604;
+        const newPage = msg.page | 0;
+        const first = lastPage === null;
+        const pageChanged = !first && newPage !== lastPage;
+        const sizeChanged = newW !== pageW || newH !== pageH;
+
+        if (first) {
+          // Fresh connect — empty board for the live session.
+          setPageSize(newW, newH);
+          clearScene();
+          resetBBox();
+        } else if (pageChanged) {
+          if (boardHasInk()) savePng('page-hello');
+          setPageSize(newW, newH);
+          clearScene();
+          resetBBox();
+        } else if (sizeChanged) {
+          // Orientation change on the same page: tablet keeps strokes and only
+          // remaps the logical canvas — we must NOT wipe the board.
+          setPageSize(newW, newH);
+          requestRedraw();
+          toast(newW >= newH ? 'Landscape' : 'Portrait');
+        } else {
+          // Same page + size (e.g. reconnect with identical hello) — keep ink.
+          requestRedraw();
+        }
+
+        lastPage = newPage;
+        pageW = newW; pageH = newH;
         const orient = pageW >= pageH ? 'land' : 'port';
         if (orient !== lastOrient) {
           lastOrient = orient;
-          resizeWindowToPage().then(fitCanvas); // flip the window to match, then refit
+          resizeWindowToPage().then(fitCanvas);
         } else {
           fitCanvas();
         }
-        setStatus(`connected · page ${(msg.page | 0) + 1}/${msg.pages | 1}`, true);
+        setStatus(`connected · page ${newPage + 1}/${msg.pages | 1}`, true);
         setDebug('hello');
       } else if (t === 'page') {
+        // Page flip: snapshot previous ink, then wipe.
+        if (boardHasInk()) savePng('page-flip');
+        clearScene();
+        resetBBox();
+        lastPage = msg.page | 0;
         setStatus(`connected · page ${(msg.page | 0) + 1}/${msg.pages | 1}`, true);
+        setDebug('page');
       } else if (t === 'clear') {
-        clearPaper();
+        // From tablet rail/more panel OR echo of our desktop clear cmd.
+        // Snapshot only if we still have ink (avoid double-save on our own cmd).
+        if (boardHasInk()) {
+          savePng('tablet-clear');
+        }
+        clearScene();
         resetBBox();
         setDebug('clear');
       } else if (t === 'undo') {
-        // v1: no per-stroke undo (needs a retained stroke list); ignore.
+        if (!undoLast()) setDebug('undo-empty');
       } else if (t === 'down') {
         const s = {
+          kind: 'path',
           points: [{ x: msg.x, y: msg.y }],
           tool: msg.tool || 'pen',
           color: msg.color | 0,
@@ -260,85 +980,197 @@
         };
         live.set(msg.id, s);
         recordCoord(msg.x, msg.y);
-        drawTail(s);
+        requestRedraw();
         setDebug(`${s.tool} c${s.color}`);
       } else if (t === 'move') {
         const s = live.get(msg.id);
         if (!s) return;
         recordCoord(msg.x, msg.y);
-        const prev = s.points[s.points.length - 1];
-        // low-pass the incoming sample toward the previous point
-        s.points.push({
-          x: prev.x + (msg.x - prev.x) * SMOOTH,
-          y: prev.y + (msg.y - prev.y) * SMOOTH,
-        });
-        drawTail(s);
+        pushLivePoint(s, msg.x, msg.y);
+        requestRedraw();
         setDebug();
       } else if (t === 'up') {
         const s = live.get(msg.id);
-        if (s) finishStroke(s);
-        live.delete(msg.id);
-      } else if (t === 'shape') {
-        ctx.strokeStyle = COLORS[msg.color | 0] || '#111';
-        ctx.lineWidth = WIDTHS[msg.width | 0] || 2;
-        const tool = msg.tool || 'rect';
-        const x0 = msg.x0, y0 = msg.y0, x1 = msg.x1, y1 = msg.y1;
-        ctx.beginPath();
-        if (tool === 'rect') {
-          ctx.strokeRect(Math.min(x0, x1), Math.min(y0, y1), Math.abs(x1 - x0), Math.abs(y1 - y0));
-        } else if (tool === 'circle' || tool === 'oval') {
-          const cx = (x0 + x1) / 2, cy = (y0 + y1) / 2, rx = Math.abs(x1 - x0) / 2, ry = Math.abs(y1 - y0) / 2;
-          ctx.ellipse(cx, cy, rx || 1, ry || 1, 0, 0, Math.PI * 2);
-          ctx.stroke();
-        } else if (tool === 'line' || tool === 'arrow') {
-          ctx.moveTo(x0, y0); ctx.lineTo(x1, y1); ctx.stroke();
-        } else if (tool === 'tri') {
-          const ax = (x0 + x1) / 2;
-          ctx.moveTo(ax, y0); ctx.lineTo(x0, y1); ctx.lineTo(x1, y1); ctx.closePath(); ctx.stroke();
+        if (s) {
+          live.delete(msg.id);
+          // Commit as-is — same geometry as live (no reshape).
+          strokes.push(s);
+          requestRedraw();
+          setDebug();
+        } else {
+          live.delete(msg.id);
         }
-        setDebug('shape:' + tool);
+      } else if (t === 'shape') {
+        const s = {
+          kind: 'shape',
+          tool: msg.tool || 'rect',
+          color: msg.color | 0,
+          width: msg.width | 0,
+          x0: msg.x0, y0: msg.y0, x1: msg.x1, y1: msg.y1,
+        };
+        strokes.push(s);
+        requestRedraw();
+        setDebug('shape:' + s.tool);
       }
     }
 
-    // ── Events from the Rust core ─────────────────────────────────────────
-    listen('stroke', (e) => {
-      try { handle(JSON.parse(e.payload)); }
-      catch (err) { console.warn('bad frame', e.payload, err); }
-    });
-    listen('status', (e) => {
-      const s = e.payload;
-      if (s.state === 'connected') setStatus(`connected · ${s.host}`, true);
-      else if (s.state === 'connecting') setStatus(`connecting to ${s.host}…`, false);
-      else setStatus(`reconnecting to ${s.host}…`, false);
-    });
+    // ── Events from the Rust core ────────────────────────────────────────
+    function applyStatus(s) {
+      if (!s) return;
+      if (s.state === 'connected') {
+        tabletLinked = true;
+        setStatus(`connected · ${s.host}`, true);
+      } else if (s.state === 'connecting') {
+        tabletLinked = false;
+        setStatus(`connecting to ${s.host}…`, false);
+      } else {
+        tabletLinked = false;
+        const why = s.error ? ` · ${s.error}` : '';
+        setStatus(`reconnecting to ${s.host}…${why}`, false);
+      }
+    }
 
-    // ── Controls ──────────────────────────────────────────────────────────
+    // ── Controls ─────────────────────────────────────────────────────────
     async function applyTablet() {
       const host = document.getElementById('host').value.trim();
       const port = parseInt(document.getElementById('port').value.trim(), 10) || 27182;
       await invoke('set_tablet', { host, port });
-      clearPaper();
+      clearScene();
+      resetBBox();
+      lastPage = null;
+      setDebug();
     }
     async function init() {
+      // Register listeners BEFORE querying snapshot so we cannot miss a
+      // connect/hello that races with startup.
+      await listen('stroke', (e) => {
+        try { handle(JSON.parse(e.payload)); }
+        catch (err) { console.warn('bad frame', e.payload, err); }
+      });
+      await listen('status', (e) => applyStatus(e.payload));
+
       const t = await invoke('get_tablet');
       document.getElementById('host').value = t.host;
       document.getElementById('port').value = t.port;
+
+      const snap = await invoke('get_status');
+      applyStatus(snap);
+      // Replay the hello that arrived before this WebView existed.
+      if (snap && snap.state === 'connected' && snap.lastHello) {
+        try { handle(JSON.parse(snap.lastHello)); }
+        catch (err) { console.warn('replay hello', err); }
+      }
     }
 
     menuBtn.onclick = () => { panel.hidden = !panel.hidden; };
     document.getElementById('btnApply').onclick = applyTablet;
-    document.getElementById('btnClear').onclick = clearPaper;
-    document.getElementById('btnRotate').onclick = () => {
-      viewRotation = (viewRotation + 90) % 180; // toggle 0 <-> 90
-      fitCanvas();
-      setDebug();
+    document.getElementById('btnClear').onclick = () => { requestClear(); };
+    document.getElementById('btnUndo').onclick = () => { requestUndo(); };
+    document.getElementById('btnRotate').onclick = () => { requestRotate(); };
+    document.getElementById('btnSave').onclick = () => savePng('board');
+    document.getElementById('btnCopy').onclick = () => copyBoard();
+    document.getElementById('btnExports').onclick = () => openExports();
+    document.getElementById('btnObs').onclick = () => setObsMode(!obsMode);
+    document.getElementById('btnMeeting').onclick = () => {
+      if (obsMode) setObsMode(false);
+      else setMeetingMode(!meetingMode);
     };
+    document.getElementById('btnChroma').onclick = () => setChroma(!chromaOn);
+    document.getElementById('btnDark').onclick = () => setDark(!darkMode);
+    document.getElementById('btnOverlay').onclick = () => { setTransparent(!transparentMode); };
+    document.getElementById('btnClickThru').onclick = () => { setClickThrough(!clickThrough); };
+    document.getElementById('btnFullscreen').onclick = () => setFullscreen(!isFullscreen);
+    document.getElementById('btnPin').onclick = () => setAlwaysOnTop(!alwaysOnTop);
+
     window.addEventListener('resize', fitCanvas);
 
-    clearPaper();
+    // Keyboard shortcuts (ignored while typing in inputs)
+    window.addEventListener('keydown', (e) => {
+      const tag = (e.target && e.target.tagName) || '';
+      if (tag === 'INPUT' || tag === 'TEXTAREA') return;
+      const key = e.key.toLowerCase();
+      const mod = e.metaKey || e.ctrlKey;
+
+      if (key === 's' && mod) {
+        e.preventDefault();
+        savePng('board');
+      } else if (key === 'c' && mod) {
+        e.preventDefault();
+        copyBoard();
+      } else if (key === 'o' && !mod) {
+        e.preventDefault();
+        setObsMode(!obsMode);
+      } else if (key === 'g' && !mod) {
+        e.preventDefault();
+        setChroma(!chromaOn);
+      } else if (key === 'd' && !mod) {
+        e.preventDefault();
+        setDark(!darkMode);
+      } else if (key === 't' && !mod) {
+        e.preventDefault();
+        setTransparent(!transparentMode);
+      } else if (key === 'i' && !mod) {
+        e.preventDefault();
+        setClickThrough(!clickThrough);
+      } else if (key === 'm' && !mod) {
+        e.preventDefault();
+        if (obsMode) setObsMode(false);
+        else setMeetingMode(!meetingMode);
+      } else if (key === 'escape') {
+        if (clickThrough) {
+          // Highest-priority escape: never leave the user unable to click.
+          e.preventDefault();
+          setClickThrough(false);
+        } else if (transparentMode) {
+          e.preventDefault();
+          setTransparent(false);
+        } else if (obsMode) {
+          e.preventDefault();
+          setObsMode(false);
+        } else if (meetingMode) {
+          e.preventDefault();
+          setMeetingMode(false);
+        } else if (isFullscreen) {
+          e.preventDefault();
+          setFullscreen(false);
+        }
+      } else if (key === 'f' && !mod) {
+        e.preventDefault();
+        setFullscreen(!isFullscreen);
+      } else if (key === 'p' && !mod) {
+        e.preventDefault();
+        setAlwaysOnTop(!alwaysOnTop);
+      } else if ((key === 'z' && mod && !e.shiftKey) || (key === 'z' && !mod && e.altKey)) {
+        e.preventDefault();
+        requestUndo();
+      } else if (key === 'u' && !mod) {
+        e.preventDefault();
+        requestUndo();
+      } else if (key === 'r' && !mod) {
+        e.preventDefault();
+        requestRotate();
+      } else if ((key === 'backspace' || key === 'delete') && mod) {
+        e.preventDefault();
+        requestClear();
+      }
+    });
+
+    // Restore the saved board theme before the first paint so there is no flash.
+    try { setDark(localStorage.getItem(DARK_KEY) === '1', { quiet: true }); }
+    catch (err) { /* private mode — stay light */ }
+    try {
+      const r = parseInt(localStorage.getItem(ROT_KEY) || '0', 10);
+      if (r === 90 || r === 180 || r === 270) viewRotation = r;
+    } catch (err) { /* private mode — stay upright */ }
+
+    setPageSize(pageW, pageH);
+    clearScene();
     fitCanvas();
     setDebug();
-    init();
+    init().catch((err) => {
+      console.warn('init failed', err);
+      setStatus('init failed', false);
+    });
   </script>
 </body>
 </html>

@@ -7,6 +7,9 @@ edition = "2021"
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = [] }
+# macos-private-api: required by `app.macOSPrivateApi` in tauri.conf.json for
+# the transparent overlay window. Uses private Apple APIs — fine for our
+# self-distributed unsigned build, but it rules out Mac App Store submission.
+tauri = { version = "2", features = ["macos-private-api"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

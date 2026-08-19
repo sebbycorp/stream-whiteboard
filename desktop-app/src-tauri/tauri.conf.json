@@ -8,6 +8,7 @@
   },
   "app": {
     "withGlobalTauri": true,
+    "macOSPrivateApi": true,
     "windows": [
       {
         "label": "main",
@@ -16,7 +17,8 @@
         "height": 1200,
         "minWidth": 405,
         "minHeight": 540,
-        "resizable": true
+        "resizable": true,
+        "transparent": true
       }
     ],
     "security": {
@@ -25,7 +27,11 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["app"],
-    "icon": ["icons/icon.icns"]
+    "targets": [
+      "app"
+    ],
+    "icon": [
+      "icons/icon.icns"
+    ]
   }
 }
