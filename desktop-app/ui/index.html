@@ -54,9 +54,10 @@
     #paper { z-index: 0; }
     #c { z-index: 1; }
 
-    /* Small floating menu button (top-left). Tints green when connected. */
+    /* Small floating menu button. Sits right of the macOS traffic lights,
+       which now float over the board (titleBarStyle: Overlay). */
     #menuBtn {
-      position: fixed; top: 12px; left: 12px; z-index: 10;
+      position: fixed; top: 12px; left: 84px; z-index: 10;
       width: 34px; height: 34px; border-radius: 8px;
       background: rgba(20,20,20,.72); color: #eee;
       border: 1px solid #3a3a3a; cursor: pointer;
@@ -73,6 +74,16 @@
       box-shadow: 0 0 0 2px rgba(61,204,122,.35);
     }
     #menuBtn:hover { background: rgba(40,40,40,.85); }
+
+    /* Invisible drag strip along the top edge. With a transparent, full-size
+       content titlebar the webview swallows titlebar drags, so this gives the
+       window back its "grab the top and move it" behaviour (double-click to
+       zoom still works). The traffic lights sit in the native titlebar above
+       this strip, so they keep their own clicks. */
+    #dragbar {
+      position: fixed; top: 0; left: 0; right: 0; height: 28px; z-index: 5;
+      background: transparent;
+    }
 
     /* Collapsible control panel */
     #panel {
@@ -190,6 +201,7 @@
   </style>
 </head>
 <body>
+  <div id="dragbar" data-tauri-drag-region></div>
   <button id="menuBtn" title="Show / hide controls (M = meeting · O = OBS)">☰</button>
   <div id="panel" hidden>
     <div class="row">
@@ -516,7 +528,7 @@
     // Peek controls in meeting mode when cursor is near top-left.
     document.addEventListener('mousemove', (e) => {
       if (!meetingMode) return;
-      const peek = e.clientX < 72 && e.clientY < 72;
+      const peek = e.clientX < 140 && e.clientY < 72;
       document.body.classList.toggle('chrome-peek', peek);
       if (peek) panel.hidden = false;
     });
