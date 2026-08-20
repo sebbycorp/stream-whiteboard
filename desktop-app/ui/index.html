@@ -312,6 +312,12 @@
     let strokes = [];
     let live = new Map(); // id -> path stroke
 
+    // AI answers. The tablet keeps these as bitmaps in a layer of their own
+    // (Page.ans[]), not as strokes, so they arrive as whole PNGs rather than
+    // as ink. Same cap as the device's MAX_ANS.
+    const MAX_ANSWERS = 6;
+    let answers = []; // { img, cx, cy, w, h, inv }
+
     // ── Toast ────────────────────────────────────────────────────────────
     let toastTimer = null;
     function toast(msg, ms = 1800) {
@@ -617,7 +623,7 @@
     }
 
     function boardHasInk() {
-      return strokes.length > 0 || live.size > 0;
+      return strokes.length > 0 || live.size > 0 || answers.length > 0;
     }
 
     async function savePng(label) {
@@ -765,6 +771,23 @@
       g.lineTo(last.x, last.y);
     }
 
+    /** Stroke bbox centre in canvas units — the tablet erases by this rule. */
+    function strokeCenter(s) {
+      if (s.kind === 'shape') {
+        return { x: (s.x0 + s.x1) / 2, y: (s.y0 + s.y1) / 2 };
+      }
+      const p = s.points;
+      if (!p || !p.length) return null;
+      let mnx = Infinity, mny = Infinity, mxx = -Infinity, mxy = -Infinity;
+      for (const q of p) {
+        if (q.x < mnx) mnx = q.x;
+        if (q.x > mxx) mxx = q.x;
+        if (q.y < mny) mny = q.y;
+        if (q.y > mxy) mxy = q.y;
+      }
+      return { x: (mnx + mxx) / 2, y: (mny + mxy) / 2 };
+    }
+
     function drawPathStroke(s, g) {
       g = g || ctx;
       const p = s.points;
@@ -807,6 +830,42 @@
       endStrokeStyle(g);
     }
 
+    /**
+     * Dark mode flips the ink palette, but an answer is a bitmap of black text
+     * on transparent — it would sink into a black board. Invert RGB once per
+     * answer and keep alpha, so transparent stays transparent.
+     */
+    function invertedCopy(img) {
+      const c = document.createElement('canvas');
+      c.width = img.naturalWidth;
+      c.height = img.naturalHeight;
+      const g = c.getContext('2d');
+      g.drawImage(img, 0, 0);
+      try {
+        const d = g.getImageData(0, 0, c.width, c.height);
+        const px = d.data;
+        for (let i = 0; i < px.length; i += 4) {
+          px[i] = 255 - px[i];
+          px[i + 1] = 255 - px[i + 1];
+          px[i + 2] = 255 - px[i + 2];
+        }
+        g.putImageData(d, 0, 0);
+      } catch (err) {
+        console.warn('answer invert failed', err); // fall back to as-received
+      }
+      return c;
+    }
+
+    function drawAnswer(a, g) {
+      const dst = g || ctx;
+      let src = a.img;
+      if (darkMode) {
+        if (!a.inv) a.inv = invertedCopy(a.img);
+        src = a.inv;
+      }
+      dst.drawImage(src, a.cx, a.cy, a.w, a.h);
+    }
+
     function drawStroke(s, g) {
       if (s.kind === 'shape') drawShapeStroke(s, g);
       else drawPathStroke(s, g);
@@ -819,6 +878,8 @@
 
     function redrawAll() {
       clearInk();
+      // Answers first: the tablet blits them under the strokes too.
+      for (const a of answers) drawAnswer(a);
       for (const s of strokes) drawStroke(s);
       for (const s of live.values()) drawPathStroke(s);
     }
@@ -835,6 +896,7 @@
 
     function clearScene() {
       strokes = [];
+      answers = [];
       live.clear();
       clearInk();
     }
@@ -1012,6 +1074,44 @@
         } else {
           live.delete(msg.id);
         }
+      } else if (t === 'ans') {
+        // An AI answer (typed reply, markmap, flow or diagram) as a PNG with
+        // the tablet's near-white already made transparent. Nothing else in the
+        // protocol describes it — the strokes never held it.
+        const b64 = msg.png || '';
+        if (!b64) { setDebug('ans-empty'); return; }
+        const img = new Image();
+        img.onload = () => {
+          answers.push({
+            img,
+            cx: msg.cx | 0,
+            cy: msg.cy | 0,
+            w: msg.w || img.naturalWidth,
+            h: msg.h || img.naturalHeight,
+            inv: null,
+          });
+          while (answers.length > MAX_ANSWERS) answers.shift();
+          requestRedraw();
+          setDebug('ans');
+        };
+        img.onerror = () => {
+          console.warn('ans: could not decode png');
+          setDebug('ans-bad');
+        };
+        img.src = 'data:image/png;base64,' + b64;
+      } else if (t === 'eraserect') {
+        // Circle-to-ask deletes the handwriting it just answered. Mirror the
+        // device rule: drop strokes whose bbox centre is inside the rect.
+        const x0 = Math.min(msg.x0, msg.x1), x1 = Math.max(msg.x0, msg.x1);
+        const y0 = Math.min(msg.y0, msg.y1), y1 = Math.max(msg.y0, msg.y1);
+        const before = strokes.length;
+        strokes = strokes.filter((s) => {
+          const c = strokeCenter(s);
+          if (!c) return false;
+          return !(c.x >= x0 && c.x <= x1 && c.y >= y0 && c.y <= y1);
+        });
+        if (strokes.length !== before) requestRedraw();
+        setDebug(`eraserect -${before - strokes.length}`);
       } else if (t === 'shape') {
         const s = {
           kind: 'shape',

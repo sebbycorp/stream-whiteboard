@@ -54,6 +54,23 @@ mod tests {
         assert_eq!(lb.push(b"a\n\n\nb\n"), vec!["a", "b"]);
     }
 
+    /// An `ans` event is one line of tens to hundreds of KB, arriving over many
+    /// 4 KB reads. The splitter must reassemble it rather than cap or truncate.
+    #[test]
+    fn very_long_line_is_reassembled_across_many_chunks() {
+        let mut lb = LineBuffer::new();
+        let payload = "A".repeat(400_000);
+        let line = format!("{{\"t\":\"ans\",\"png\":\"{payload}\"}}");
+        let bytes = format!("{line}\n").into_bytes();
+        let mut out = Vec::new();
+        for chunk in bytes.chunks(4096) {
+            out.extend(lb.push(chunk));
+        }
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].len(), line.len());
+        assert_eq!(out[0], line);
+    }
+
     #[test]
     fn trailing_partial_is_retained_not_emitted() {
         let mut lb = LineBuffer::new();

@@ -91,6 +91,47 @@ Coalesced (~40 Hz) on the tablet when the network is busy.
 
 Committed shape from corner to corner in canvas space.
 
+### `ans` — AI answer bitmap
+
+```json
+{"t":"ans","cx":0,"cy":0,"w":1404,"h":1604,"png":"iVBORw0KGgo…"}
+```
+
+| Field | Meaning |
+|-------|---------|
+| `cx`, `cy` | Top-left placement in canvas coordinates |
+| `w`, `h` | Size to draw at, in canvas units (the bitmap is scaled to fit) |
+| `png` | Base64 **RGBA** PNG. The tablet has already made its near-white background transparent (the `0xF7DE` cutoff `ans_blit()` uses), so a viewer just composites it |
+
+Circle-to-ask answers — typed replies, markmaps, flow charts, diagrams — are
+*not* strokes. On the device they live in a separate page layer (`Page.ans[]`,
+bitmaps captured off the framebuffer), so nothing in `down`/`move`/`up`
+describes them and a viewer that only follows ink shows the question and never
+the reply. This event carries the rendered pixels instead, which covers every
+answer kind through one path and needs no font engine on the client.
+
+This is the only event that is **big** — tens to hundreds of KB on one line.
+The tablet queues it and drains it across several poll ticks, so small events
+emitted afterwards arrive *after* it, never interleaved inside it.
+
+**Client rules:** draw it *under* the ink (the device blits answers first), keep
+at most 6 (the device's `MAX_ANS`), and drop them all on `clear` / `page` /
+first `hello` exactly like strokes.
+
+### `eraserect`
+
+```json
+{"t":"eraserect","x0":100,"y0":200,"x1":900,"y1":700}
+```
+
+Strokes the tablet deleted inside a canvas-space rect. Circle-to-ask erases the
+handwriting it just answered, so without this the viewer keeps showing a
+question the tablet has already replaced.
+
+Drop every stroke whose **bounding-box centre** lies inside the rect — the same
+test `erase_strokes_in_region()` applies on the device, so both sides keep the
+same ink.
+
 ---
 
 ## Commands (desktop → tablet)
@@ -139,10 +180,13 @@ Unknown `t` / `cmd` values are ignored (forward compatible).
 3. On `down`/`move`/`up`, draw polylines with tool styling.
 4. On `clear`, wipe the page; on `undo`, drop last stroke.
 5. Prefer sending `cmd` for Clear / Undo so the tablet is source of truth — **once the device implements the parser** (see the warning above). Today, only tablet → desktop events are live.
-6. Ignore unknown `t` values for forward compatibility.
+6. On `ans`, composite the PNG under the ink; on `eraserect`, drop strokes
+   whose bbox centre is inside the rect.
+7. Ignore unknown `t` values for forward compatibility.
 
 ## Future (proto 2+)
 
-- Length-prefixed PNG resync frames  
+- Length-prefixed PNG resync frames (`ans` now covers answer bitmaps, base64 on
+  one NDJSON line — a length-prefixed frame would avoid the ~33% base64 cost)  
 - `request_resync`  
 - Auth token on connect  
