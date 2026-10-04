@@ -56,9 +56,13 @@
     /* Mirror: the tablet's own panel pixels (paper, ink, dock, menus, cards).
        Kept up to date even while hidden so switching modes is instant. */
     #mirror { z-index: 2; display: none !important; }
+    /* Live ink drawn as vectors over the mirror until the tablet's own pixels
+       for that stroke arrive — keeps writing as smooth as the ink view. */
+    #mink { z-index: 3; display: none !important; }
     body.mirror #paper,
     body.mirror #c { display: none !important; }
-    body.mirror #mirror { display: block !important; }
+    body.mirror #mirror,
+    body.mirror #mink { display: block !important; }
 
     /* Small floating menu button. Sits right of the macOS traffic lights,
        which now float over the board (titleBarStyle: Overlay). */
@@ -255,6 +259,7 @@
       <canvas id="paper" width="1404" height="1604"></canvas>
       <canvas id="c" width="1404" height="1604"></canvas>
       <canvas id="mirror" width="1404" height="1872"></canvas>
+      <canvas id="mink" width="1404" height="1872"></canvas>
     </div>
   </div>
 
@@ -285,7 +290,14 @@
     const paperCanvas = document.getElementById('paper');
     const paperCtx = paperCanvas.getContext('2d');
     const mirrorCanvas = document.getElementById('mirror');
-    const mirrorCtx = mirrorCanvas.getContext('2d', { alpha: false }) || mirrorCanvas.getContext('2d');
+    // Visible mirror: raw pixels, or with the paper keyed out in Overlay mode.
+    const mirrorCtx = mirrorCanvas.getContext('2d');
+    // Raw tablet pixels (offscreen) — the source of truth for the mirror.
+    const mirrorRaw = document.createElement('canvas');
+    mirrorRaw.width = 1404; mirrorRaw.height = 1872;
+    const rawCtx = mirrorRaw.getContext('2d', { willReadFrequently: true });
+    const minkCanvas = document.getElementById('mink');
+    const minkCtx = minkCanvas.getContext('2d', { alpha: true, desynchronized: true }) || minkCanvas.getContext('2d');
     const sheet = document.getElementById('sheet');
     const stage = document.getElementById('stage');
     const menuBtn = document.getElementById('menuBtn');
@@ -329,6 +341,13 @@
     let mirrorChain = Promise.resolve(); // serialises fb decode+draw in arrival order
     let mirrorFrames = 0;
     let helloMirror = null; // null = no hello yet; else whether hello had mirror:1
+    // Overlay ink (panel coords). mLive: pen still down; mDone: lifted, waiting
+    // for the fb tile that carries its real pixels (or the fallback timeout).
+    let mLive = new Map();
+    let mDone = [];
+    const MINK_FALLBACK_MS = 1500;
+    // Overlay keying: tablet paper ≈ rgb(247,250,247); the dock (≈232) stays.
+    const KEY_MIN = 240;
 
     // Retained scene: finished strokes/shapes. Live strokes sit in `live` until pen-up.
     // kind: 'path' | 'shape'
@@ -450,6 +469,7 @@
     async function setTransparent(on, opts) {
       transparentMode = !!on;
       document.body.classList.toggle('transparent', transparentMode);
+      rebuildMirror(); // key the paper out of (or back into) the mirror
       document.getElementById('btnOverlay').classList.toggle('active', transparentMode);
       if (transparentMode) {
         // Overlay is useless behind other windows.
@@ -637,16 +657,17 @@
     // ── Export: composite paper + ink → PNG ──────────────────────────────
     function compositeBoard() {
       // Mirror mode exports the tablet's pixels as-is; otherwise paper + ink.
-      const layers = mirrorMode ? [mirrorCanvas] : [paperCanvas, canvas];
+      // Exports what is visible: in mirror mode the (keyed) mirror + overlay ink.
+      const layers = mirrorMode ? [mirrorCanvas, minkCanvas] : [paperCanvas, canvas];
       // Ensure live ink is fully painted before capture.
-      if (!mirrorMode) redrawAll();
+      redrawAll();
       const [sw, sh] = viewDims();
       const rotated = (viewRotation % 180) !== 0;
       const out = document.createElement('canvas');
       out.width = rotated ? sh : sw;
       out.height = rotated ? sw : sh;
       const g = out.getContext('2d');
-      g.fillStyle = mirrorMode ? '#ffffff' : paperColor;
+      g.fillStyle = mirrorMode ? (transparentMode ? 'transparent' : '#ffffff') : paperColor;
       g.fillRect(0, 0, out.width, out.height);
       if (viewRotation) {
         // Bake the view rotation in so a saved PNG matches what's on screen.
@@ -730,22 +751,22 @@
       if (isErase(tool)) return 48;
       return WIDTHS[Math.min(2, Math.max(0, w | 0))] || 5.2;
     }
-    function strokeStyle(tool, color) {
+    function strokeStyle(tool, color, dark = darkMode) {
       // Erase draws with destination-out, so its colour is irrelevant — the
       // paper below shows through whatever the board colour is.
       if (isErase(tool)) return '#000';
       if (isHighlight(tool)) {
-        return darkMode ? 'rgba(255, 214, 64, 0.30)' : 'rgba(235, 205, 70, 0.42)';
+        return dark ? 'rgba(255, 214, 64, 0.30)' : 'rgba(235, 205, 70, 0.42)';
       }
-      const table = darkMode ? COLORS_DARK : COLORS_LIGHT;
+      const table = dark ? COLORS_DARK : COLORS_LIGHT;
       return table[color | 0] || table[0];
     }
 
     function beginStrokeStyle(g, s) {
       g.lineCap = 'round';
       g.lineJoin = 'round';
-      g.strokeStyle = strokeStyle(s.tool, s.color);
-      g.lineWidth = toolWidth(s.tool, s.width);
+      g.strokeStyle = strokeStyle(s.tool, s.color, s.light ? false : darkMode);
+      g.lineWidth = toolWidth(s.tool, s.width) * (s.zs || 1);
       g.globalCompositeOperation = isErase(s.tool) ? 'destination-out' : 'source-over';
     }
     function endStrokeStyle(g) {
@@ -913,6 +934,9 @@
     }
 
     function redrawAll() {
+      // Mirror mode only shows the overlay ink; the ink view catches up when
+      // the mode is switched off (setMirror requests a redraw).
+      if (mirrorMode) { redrawMink(); return; }
       clearInk();
       // Answers first: the tablet blits them under the strokes too.
       for (const a of answers) drawAnswer(a);
@@ -931,6 +955,7 @@
     }
 
     function clearScene() {
+      dropMink(true);
       strokes = [];
       answers = [];
       live.clear();
@@ -1025,16 +1050,143 @@
     }
 
     function clearMirror() {
-      mirrorCtx.fillStyle = '#ffffff';
-      mirrorCtx.fillRect(0, 0, mirrorCanvas.width, mirrorCanvas.height);
+      rawCtx.fillStyle = '#ffffff';
+      rawCtx.fillRect(0, 0, mirrorRaw.width, mirrorRaw.height);
+      blitMirror(0, 0, mirrorRaw.width, mirrorRaw.height);
+    }
+
+    /**
+     * Copy a rect of raw tablet pixels to the visible mirror. In Overlay mode
+     * the paper is keyed out (min(r,g,b) ≥ KEY_MIN → transparent) so only ink,
+     * dock and cards float over the desktop. Only the rect is processed.
+     */
+    function blitMirror(x, y, w, h) {
+      const x0 = Math.max(0, x | 0), y0 = Math.max(0, y | 0);
+      const x1 = Math.min(mirrorRaw.width, Math.ceil(x + w)), y1 = Math.min(mirrorRaw.height, Math.ceil(y + h));
+      if (x1 <= x0 || y1 <= y0) return;
+      const rw = x1 - x0, rh = y1 - y0;
+      if (!transparentMode) {
+        mirrorCtx.clearRect(x0, y0, rw, rh);
+        mirrorCtx.drawImage(mirrorRaw, x0, y0, rw, rh, x0, y0, rw, rh);
+        return;
+      }
+      const d = rawCtx.getImageData(x0, y0, rw, rh);
+      const px = d.data;
+      for (let i = 0; i < px.length; i += 4) {
+        if (px[i] >= KEY_MIN && px[i + 1] >= KEY_MIN && px[i + 2] >= KEY_MIN) px[i + 3] = 0;
+      }
+      mirrorCtx.putImageData(d, x0, y0);
+    }
+
+    function rebuildMirror() {
+      blitMirror(0, 0, mirrorRaw.width, mirrorRaw.height);
+    }
+
+    // ── Mirror overlay ink ───────────────────────────────────────────────
+    function minkBBox(s) {
+      const pad = toolWidth(s.tool, s.width) * (s.zs || 1) + 4;
+      let mnx = Infinity, mny = Infinity, mxx = -Infinity, mxy = -Infinity;
+      const add = (x, y) => {
+        if (x < mnx) mnx = x; if (x > mxx) mxx = x;
+        if (y < mny) mny = y; if (y > mxy) mxy = y;
+      };
+      for (const q of s.points) add(q.x, q.y);
+      for (const q of s.raw) add(q.x, q.y);
+      return { x0: mnx - pad, y0: mny - pad, x1: mxx + pad, y1: mxy + pad };
+    }
+
+    let minkPending = false;
+    function requestMinkRedraw() {
+      if (minkPending) return;
+      minkPending = true;
+      requestAnimationFrame(() => { minkPending = false; redrawMink(); });
+    }
+
+    function redrawMink() {
+      minkCtx.globalCompositeOperation = 'source-over';
+      minkCtx.clearRect(0, 0, minkCanvas.width, minkCanvas.height);
+      for (const s of mDone) drawStroke(s, minkCtx);
+      for (const s of mLive.values()) drawPathStroke(s, minkCtx);
+    }
+
+    /** Drop finished overlay strokes (and live ones too when `all`). */
+    function dropMink(all) {
+      if (!mDone.length && !(all && mLive.size)) return;
+      mDone = [];
+      if (all) mLive.clear();
+      requestMinkRedraw();
+    }
+
+    function finishMink(s) {
+      s.up = performance.now();
+      s.bbox = minkBBox(s);
+      mDone.push(s);
+      setTimeout(pruneMink, MINK_FALLBACK_MS + 20);
+    }
+
+    /** Fallback: a lifted stroke whose tile never came goes after 1.5 s. */
+    function pruneMink() {
+      const now = performance.now();
+      const before = mDone.length;
+      mDone = mDone.filter((s) => now - s.up < MINK_FALLBACK_MS);
+      if (mDone.length !== before) requestMinkRedraw();
+    }
+
+    /** A tile that arrived after a stroke's pen-up and fully contains its
+     *  padded bbox already shows the real pixels — retire the vector copy. */
+    function retireMinkUnder(x, y, w, h, arrivedAt) {
+      const before = mDone.length;
+      mDone = mDone.filter((s) => !(s.up <= arrivedAt
+        && s.bbox.x0 >= x && s.bbox.y0 >= y && s.bbox.x1 <= x + w && s.bbox.y1 <= y + h));
+      if (mDone.length !== before) requestMinkRedraw();
+    }
+
+    /** Panel-pixel pen position. The tablet adds px/py to down/move because
+     *  canvas x/y go through its pan/zoom; without them there is no overlay. */
+    function panelPos(msg) {
+      const x = Number(msg.px), y = Number(msg.py);
+      if (msg.px == null || msg.py == null || !Number.isFinite(x) || !Number.isFinite(y)) return null;
+      return { x, y };
+    }
+
+    function minkDown(msg) {
+      const tool = msg.tool || 'pen';
+      if (isErase(tool)) return; // the tablet's own pixels show the erase
+      const p = panelPos(msg);
+      if (!p) return;
+      const zs = Number(msg.zs);
+      mLive.set(msg.id, {
+        kind: 'path', light: true, points: [{ x: p.x, y: p.y }], raw: [{ x: p.x, y: p.y }],
+        tool, color: msg.color | 0, width: msg.width | 0,
+        zs: Number.isFinite(zs) && zs > 0 ? zs : 1, up: null, bbox: null,
+      });
+    }
+
+    function minkMove(msg) {
+      const s = mLive.get(msg.id);
+      if (!s) return;
+      const p = panelPos(msg);
+      if (!p) return;
+      s.raw.push({ x: p.x, y: p.y });
+      pushLivePoint(s, p.x, p.y);
+    }
+
+    function minkUp(msg) {
+      const s = mLive.get(msg.id);
+      if (!s) return;
+      mLive.delete(msg.id);
+      finishMink(s);
     }
 
     /** Resize the mirror to the panel size (clears it — a keyframe follows). */
     function setMirrorSize(w, h) {
-      if (w === mirrorCanvas.width && h === mirrorCanvas.height) return false;
+      if (w === mirrorRaw.width && h === mirrorRaw.height) return false;
       fbW = w; fbH = h;
+      mirrorRaw.width = w; mirrorRaw.height = h;
       mirrorCanvas.width = w; mirrorCanvas.height = h;
+      minkCanvas.width = w; minkCanvas.height = h;
       clearMirror();
+      requestMinkRedraw();
       if (mirrorMode) resizeWindowToPage().then(fitCanvas);
       return true;
     }
@@ -1060,15 +1212,22 @@
       try { bytes = b64ToBytes(b64); }
       catch (err) { console.warn('fb: bad base64', err); setDebug('fb-bad'); return; }
       const key = msg.key === 1 || msg.key === true;
+      const arrivedAt = performance.now(); // compared with overlay pen-up times
       mirrorChain = mirrorChain.then(async () => {
         const bmp = await createImageBitmap(new Blob([bytes], { type: 'image/png' }));
+        const px = Math.round(x), py = Math.round(y);
+        const bw = bmp.width, bh = bmp.height;
         try {
           // A keyframe is the whole panel: trust its size if hello didn't say.
-          if (key && x === 0 && y === 0) setMirrorSize(bmp.width, bmp.height);
-          mirrorCtx.drawImage(bmp, Math.round(x), Math.round(y));
+          if (key && px === 0 && py === 0) setMirrorSize(bw, bh);
+          rawCtx.drawImage(bmp, px, py);
         } finally {
           if (bmp.close) bmp.close();
         }
+        blitMirror(px, py, bw, bh);
+        // Swap vector ink for the real pixels in the same frame they land.
+        if (key) dropMink(false);
+        else retireMinkUnder(px, py, bw, bh, arrivedAt);
         mirrorFrames++;
         if (mirrorMode) setDebug(key ? 'fb key' : 'fb');
       }).catch((err) => {
@@ -1089,6 +1248,12 @@
       }
     }
 
+    /** Opt in/out of `fb` for this viewer (the tablet keyframes on mirror_on). */
+    async function sendMirrorOptIn(on) {
+      try { await invoke('tablet_cmd', { cmd: on ? 'mirror_on' : 'mirror_off' }); }
+      catch (err) { console.warn('tablet_cmd mirror', on, err); }
+    }
+
     function warnNoMirror() {
       if (mirrorMode && helloMirror === false) {
         toast('Set Live stream to Screen on the tablet', 3200);
@@ -1107,7 +1272,9 @@
       if (!(opts && opts.boot)) await resizeWindowToPage();
       fitCanvas();
       setDebug(mirrorMode ? 'mirror' : 'ink');
-      if (mirrorMode && tabletLinked) sendResync(true);
+      if (!mirrorMode) dropMink(true);
+      requestRedraw(); // ink view or overlay, whichever is now showing
+      if (tabletLinked) sendMirrorOptIn(mirrorMode);
       if (quiet) return;
       if (warnNoMirror()) return;
       toast(mirrorMode ? 'Mirror · exact tablet screen' : 'Mirror off · ink view');
@@ -1179,6 +1346,7 @@
         resetBBox();
         setDebug('clear');
       } else if (t === 'undo') {
+        dropMink(false); // the undone stroke must not linger on the overlay
         if (!undoLast()) setDebug('undo-empty');
       } else if (t === 'down') {
         const s = {
@@ -1189,10 +1357,12 @@
           width: msg.width | 0,
         };
         live.set(msg.id, s);
+        if (mirrorMode) minkDown(msg);
         recordCoord(msg.x, msg.y);
         requestRedraw();
         setDebug(`${s.tool} c${s.color}`);
       } else if (t === 'move') {
+        if (mirrorMode) minkMove(msg);
         const s = live.get(msg.id);
         if (!s) return;
         recordCoord(msg.x, msg.y);
@@ -1200,6 +1370,7 @@
         requestRedraw();
         setDebug();
       } else if (t === 'up') {
+        if (mirrorMode) minkUp(msg);
         const s = live.get(msg.id);
         if (s) {
           live.delete(msg.id);
@@ -1240,6 +1411,7 @@
         // device rule: drop strokes whose bbox centre is inside the rect.
         const x0 = Math.min(msg.x0, msg.x1), x1 = Math.max(msg.x0, msg.x1);
         const y0 = Math.min(msg.y0, msg.y1), y1 = Math.max(msg.y0, msg.y1);
+        dropMink(false);
         const before = strokes.length;
         strokes = strokes.filter((s) => {
           const c = strokeCenter(s);
@@ -1249,8 +1421,7 @@
         if (strokes.length !== before) requestRedraw();
         setDebug(`eraserect -${before - strokes.length}`);
       } else if (t === 'fb') {
-        // Mirror piece. Always applied, even outside mirror mode, so turning
-        // the mode on shows a current screen straight away.
+        // Mirror piece. Only sent to viewers that opted in with mirror_on.
         queueFb(msg);
       } else if (t === 'shape') {
         const s = {
@@ -1273,7 +1444,9 @@
         const wasLinked = tabletLinked;
         tabletLinked = true;
         setStatus(`connected · ${s.host}`, true);
-        // No resync here: the tablet sends every new viewer a keyframe on its own.
+        // fb is opt-in per connection: re-arm it on every (re)connect. The
+        // tablet answers mirror_on with a keyframe, so no resync is needed.
+        if (mirrorMode && !wasLinked) sendMirrorOptIn(true);
       } else if (s.state === 'connecting') {
         tabletLinked = false;
         setStatus(`connecting to ${s.host}…`, false);
