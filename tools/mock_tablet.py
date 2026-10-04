@@ -12,9 +12,12 @@ than strokes, so this is the only way to exercise that path without the device.
 
 Stream mirror ("Live stream: Screen"): the hello carries fbw/fbh/mirror, and the
 mock keeps a fake 1404x1872 RGB panel (grey top bar, side dock, footer, paper).
-It sends a whole-panel `fb` keyframe (key:1) on connect, a small `fb` tile for
-the damage of every finished stroke, and a fresh keyframe on `cmd:resync` or
-clear. `--no-mirror` sends an old-style hello (no fb), as a tablet set to Ink.
+fb is opt-in per viewer, as on the device: nothing until the viewer sends
+`cmd:mirror_on` (answered with a whole-panel keyframe, key:1), then a small `fb`
+tile for the damage of every finished stroke, and a fresh keyframe on
+`cmd:resync` or clear; `cmd:mirror_off` stops it. down/move carry the
+panel-pixel pen position (px/py, plus zs on down) for the app's overlay ink.
+`--no-mirror` sends an old-style hello (no fb ever), as a tablet set to Ink.
 
 Usage:
   python3 tools/mock_tablet.py [--no-mirror] [--port N]
@@ -217,7 +220,9 @@ def send_answer(conn, w, h, rect):
 def hello(w, h):
     msg = {"t": "hello", "proto": 1, "w": w, "h": h, "page": 0, "pages": 1}
     if MIRROR:
-        msg.update({"fbw": FB_W, "fbh": FB_H, "mirror": 1})
+        # cy: panel y of canvas y=0 (this fake panel has no pan/zoom, so a
+        # canvas point maps to panel (x, y + TOP_BAR) — the same as px/py).
+        msg.update({"fbw": FB_W, "fbh": FB_H, "mirror": 1, "cy": TOP_BAR})
     return msg
 
 
@@ -227,18 +232,27 @@ def draw_session(conn):
     panel = Panel()
     send(conn, hello(w, h))
     send(conn, {"t": "clear"})
-    if MIRROR:
-        send_fb(conn, panel, 0, 0, FB_W, FB_H, key=True)   # new viewer → keyframe
+    viewer = {"mirror": False}   # fb is opt-in: nothing until cmd:mirror_on
+
+    def fb(x, y, w_, h_, key=False):
+        if MIRROR and viewer["mirror"]:
+            send_fb(conn, panel, x, y, w_, h_, key=key)
 
     def mirror_cmd(cmd):
         """Mirror side effects of a desktop cmd. Returns True if handled."""
+        if cmd == "mirror_on":
+            viewer["mirror"] = True
+            fb(0, 0, FB_W, FB_H, key=True)
+            return True
+        if cmd == "mirror_off":
+            viewer["mirror"] = False
+            return True
         if cmd == "resync":
-            if MIRROR:
-                send_fb(conn, panel, 0, 0, FB_W, FB_H, key=True)
+            fb(0, 0, FB_W, FB_H, key=True)
             return True
         if cmd in ("clear", "erase", "eraseall") and MIRROR:
             panel.reset()
-            send_fb(conn, panel, 0, 0, FB_W, FB_H, key=True)
+            fb(0, 0, FB_W, FB_H, key=True)
         return False
 
     def stroke_damage(x0, y0, x1, y1):
@@ -250,8 +264,7 @@ def draw_session(conn):
         if py1 >= FB_H - FOOTER:
             return
         panel.line(x0, py0, x1, py1)
-        send_fb(conn, panel, min(x0, x1) - 8, min(py0, py1) - 8,
-                abs(x1 - x0) + 16, abs(py1 - py0) + 16)
+        fb(min(x0, x1) - 8, min(py0, py1) - 8, abs(x1 - x0) + 16, abs(py1 - py0) + 16)
 
     sid = 1
     y = 100
@@ -279,7 +292,8 @@ def draw_session(conn):
                 print(f"[mock] orientation {w}x{h}")
 
         # one diagonal stroke, point by point, ~40 Hz
-        send(conn, {"t": "down", "id": sid, "tool": "pen", "color": sid % 6, "width": 1, "x": 100, "y": y})
+        send(conn, {"t": "down", "id": sid, "tool": "pen", "color": sid % 6, "width": 1, "x": 100, "y": y,
+                    "px": 100, "py": y + TOP_BAR, "zs": 1.0})
         for i in range(1, 60):
             # poll cmds mid-stroke so Clear/Undo feel responsive
             buf, cmds = try_read_cmds(conn, buf)
@@ -308,7 +322,8 @@ def draw_session(conn):
                     w, h = (1872, 1404) if land else (1404, 1872)
                     send(conn, hello(w, h))
             else:
-                send(conn, {"t": "move", "id": sid, "x": 100 + i * 18, "y": y + i * 4})
+                send(conn, {"t": "move", "id": sid, "x": 100 + i * 18, "y": y + i * 4,
+                            "px": 100 + i * 18, "py": y + i * 4 + TOP_BAR})
                 time.sleep(0.025)
                 continue
             break
@@ -337,7 +352,7 @@ def main():
     srv.bind((HOST, PORT))
     srv.listen(1)
     print(f"[mock] listening on {HOST}:{PORT} — Ctrl+C to stop")
-    print("[mock] accepts cmd clear|undo|rotate|resync from the desktop app")
+    print("[mock] accepts cmd clear|undo|rotate|resync|mirror_on|mirror_off from the desktop app")
     print(f"[mock] mirror {'on (fb pieces, Live stream: Screen)' if MIRROR else 'off (--no-mirror, Live stream: Ink)'}")
     while True:
         conn, addr = srv.accept()
