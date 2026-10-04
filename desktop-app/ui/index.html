@@ -1273,8 +1273,7 @@
         const wasLinked = tabletLinked;
         tabletLinked = true;
         setStatus(`connected · ${s.host}`, true);
-        // (Re)connected in mirror mode: ask for a keyframe straight away.
-        if (mirrorMode && !wasLinked) sendResync(true);
+        // No resync here: the tablet sends every new viewer a keyframe on its own.
       } else if (s.state === 'connecting') {
         tabletLinked = false;
         setStatus(`connecting to ${s.host}…`, false);
