@@ -513,10 +513,12 @@
       document.body.classList.toggle('dark', darkMode);
       document.getElementById('btnDark').classList.toggle('active', darkMode);
       try { localStorage.setItem(DARK_KEY, darkMode ? '1' : '0'); } catch (err) { /* private mode */ }
+      rebuildMirror(); // flip (or un-flip) the visible mirror from raw pixels
       refreshBoardColors();
       if (opts && opts.quiet) return;
       if (chromaOn) toast(darkMode ? 'Dark ink palette · chroma paper still on' : 'Light ink palette · chroma paper still on');
-      else toast((darkMode ? 'Dark board · light ink' : 'White board · dark ink') + mirrorNote());
+      else if (mirrorMode) toast(darkMode ? 'Dark mirror · tablet screen flipped, black ink → white' : 'Mirror · tablet colours as-is');
+      else toast(darkMode ? 'Dark board · light ink' : 'White board · dark ink');
     }
 
     async function setMeetingMode(on, opts) {
@@ -765,7 +767,7 @@
     function beginStrokeStyle(g, s) {
       g.lineCap = 'round';
       g.lineJoin = 'round';
-      g.strokeStyle = strokeStyle(s.tool, s.color, s.light ? false : darkMode);
+      g.strokeStyle = strokeStyle(s.tool, s.color);
       g.lineWidth = toolWidth(s.tool, s.width) * (s.zs || 1);
       g.globalCompositeOperation = isErase(s.tool) ? 'destination-out' : 'source-over';
     }
@@ -1065,17 +1067,72 @@
       const x1 = Math.min(mirrorRaw.width, Math.ceil(x + w)), y1 = Math.min(mirrorRaw.height, Math.ceil(y + h));
       if (x1 <= x0 || y1 <= y0) return;
       const rw = x1 - x0, rh = y1 - y0;
-      if (!transparentMode) {
+      const flip = darkMode;
+      if (!transparentMode && !flip) {
         mirrorCtx.clearRect(x0, y0, rw, rh);
         mirrorCtx.drawImage(mirrorRaw, x0, y0, rw, rh, x0, y0, rw, rh);
         return;
       }
       const d = rawCtx.getImageData(x0, y0, rw, rh);
       const px = d.data;
-      for (let i = 0; i < px.length; i += 4) {
-        if (px[i] >= KEY_MIN && px[i + 1] >= KEY_MIN && px[i + 2] >= KEY_MIN) px[i + 3] = 0;
+      const out = new Uint32Array(px.buffer, px.byteOffset, px.length >> 2);
+      const lut = flip ? darkLut() : null;
+      const key = transparentMode;
+      for (let i = 0, j = 0; j < px.length; i++, j += 4) {
+        const r = px[j], g = px[j + 1], b = px[j + 2];
+        // Key on the RAW pixel first, so paper goes clear before any flip.
+        if (key && r >= KEY_MIN && g >= KEY_MIN && b >= KEY_MIN) { out[i] = 0; continue; }
+        if (lut) out[i] = lut[((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3)];
       }
       mirrorCtx.putImageData(d, x0, y0);
+    }
+
+    /**
+     * Dark mirror: luminance flip with hue kept (HSL, L' = 1 − L), so black
+     * ink turns white, paper near-black, and red stays red rather than going
+     * cyan. Clearly coloured pixels are lifted to L' ≥ 0.55 to stay readable
+     * on the dark paper; near-greys (tiny chroma, e.g. the slightly green
+     * paper) are not lifted even if their HSL saturation reads high.
+     * The tablet framebuffer is RGB565, so a 65,536-entry LUT covers every
+     * raw pixel; built once on first use. Entries are packed RGBA for a
+     * little-endian Uint32 view of ImageData (all Macs).
+     */
+    let _darkLut = null;
+    function darkLut() {
+      if (_darkLut) return _darkLut;
+      const lut = new Uint32Array(65536);
+      for (let k = 0; k < 65536; k++) {
+        const r5 = k >> 11, g6 = (k >> 5) & 63, b5 = k & 31;
+        const r = ((r5 << 3) | (r5 >> 2)) / 255;
+        const g = ((g6 << 2) | (g6 >> 4)) / 255;
+        const b = ((b5 << 3) | (b5 >> 2)) / 255;
+        const mx = Math.max(r, g, b), mn = Math.min(r, g, b), c = mx - mn;
+        const l = (mx + mn) / 2;
+        let h = 0, sat = 0;
+        if (c > 0) {
+          sat = c / (1 - Math.abs(2 * l - 1));
+          if (mx === r) h = ((g - b) / c) % 6;
+          else if (mx === g) h = (b - r) / c + 2;
+          else h = (r - g) / c + 4;
+          h *= 60; if (h < 0) h += 360;
+        }
+        let l2 = 1 - l;
+        if (sat > 0.25 && c > 0.12 && l2 < 0.55) l2 = 0.55;
+        const c2 = (1 - Math.abs(2 * l2 - 1)) * Math.min(sat, 1);
+        const x = c2 * (1 - Math.abs(((h / 60) % 2) - 1));
+        const m = l2 - c2 / 2;
+        let rr = 0, gg = 0, bb = 0;
+        if (h < 60) { rr = c2; gg = x; }
+        else if (h < 120) { rr = x; gg = c2; }
+        else if (h < 180) { gg = c2; bb = x; }
+        else if (h < 240) { gg = x; bb = c2; }
+        else if (h < 300) { rr = x; bb = c2; }
+        else { rr = c2; bb = x; }
+        const R = Math.round((rr + m) * 255), G = Math.round((gg + m) * 255), B = Math.round((bb + m) * 255);
+        lut[k] = (0xff << 24 | B << 16 | G << 8 | R) >>> 0;
+      }
+      _darkLut = lut;
+      return lut;
     }
 
     function rebuildMirror() {
@@ -1156,7 +1213,8 @@
       if (!p) return;
       const zs = Number(msg.zs);
       mLive.set(msg.id, {
-        kind: 'path', light: true, points: [{ x: p.x, y: p.y }], raw: [{ x: p.x, y: p.y }],
+        // Palette follows darkMode, matching the (possibly flipped) mirror.
+        kind: 'path', points: [{ x: p.x, y: p.y }], raw: [{ x: p.x, y: p.y }],
         tool, color: msg.color | 0, width: msg.width | 0,
         zs: Number.isFinite(zs) && zs > 0 ? zs : 1, up: null, bbox: null,
       });
