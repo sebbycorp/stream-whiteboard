@@ -1,19 +1,30 @@
 /// Accumulates raw bytes from a stream and yields complete NDJSON lines,
 /// keeping any trailing partial line buffered across calls. Blank lines are dropped.
+///
+/// There is no line-length cap: `ans` and mirror `fb` events are single lines
+/// of hundreds of KB. `scanned` remembers how far the buffered partial line has
+/// already been searched for `\n`, so a big line arriving in many small reads
+/// costs O(n) rather than rescanning the whole buffer on every chunk.
 pub struct LineBuffer {
     buf: Vec<u8>,
+    scanned: usize,
 }
 
 impl LineBuffer {
     pub fn new() -> Self {
-        Self { buf: Vec::new() }
+        Self {
+            buf: Vec::new(),
+            scanned: 0,
+        }
     }
 
     /// Push a chunk of bytes; return every complete line (without its trailing `\n`).
     pub fn push(&mut self, data: &[u8]) -> Vec<String> {
         self.buf.extend_from_slice(data);
         let mut lines = Vec::new();
-        while let Some(pos) = self.buf.iter().position(|&b| b == b'\n') {
+        while let Some(off) = self.buf[self.scanned..].iter().position(|&b| b == b'\n') {
+            let pos = self.scanned + off;
+            self.scanned = 0;
             let line: Vec<u8> = self.buf.drain(..=pos).collect();
             let line = &line[..line.len() - 1]; // strip the trailing '\n'
             if line.is_empty() {
@@ -21,6 +32,7 @@ impl LineBuffer {
             }
             lines.push(String::from_utf8_lossy(line).into_owned());
         }
+        self.scanned = self.buf.len();
         lines
     }
 }
@@ -69,6 +81,37 @@ mod tests {
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].len(), line.len());
         assert_eq!(out[0], line);
+    }
+
+    /// A mirror keyframe (`fb`, ~300 KB of base64 PNG) arrives in uneven reads,
+    /// with the next small event glued onto the final chunk. Both must come out
+    /// intact and in order.
+    #[test]
+    fn mirror_keyframe_line_split_unevenly_then_next_event() {
+        let mut lb = LineBuffer::new();
+        let b64: String = (0..300_000)
+            .map(|i| b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"[i % 64] as char)
+            .collect();
+        let fb = format!(
+            "{{\"t\":\"fb\",\"x\":0,\"y\":0,\"w\":1404,\"h\":1872,\"key\":1,\"png\":\"{b64}\"}}"
+        );
+        let next = r#"{"t":"fb","x":8,"y":16,"w":64,"h":32,"key":0,"png":"AAAA"}"#;
+        let bytes = format!("{fb}\n{next}\n").into_bytes();
+        let sizes = [1usize, 7, 4096, 13, 65536, 333, 2];
+        let mut out = Vec::new();
+        let mut i = 0;
+        let mut k = 0;
+        while i < bytes.len() {
+            let n = sizes[k % sizes.len()].min(bytes.len() - i);
+            out.extend(lb.push(&bytes[i..i + n]));
+            i += n;
+            k += 1;
+        }
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0], fb);
+        assert_eq!(out[1], next);
+        let v: serde_json::Value = serde_json::from_str(&out[0]).unwrap();
+        assert_eq!(v["png"].as_str().unwrap().len(), 300_000);
     }
 
     #[test]

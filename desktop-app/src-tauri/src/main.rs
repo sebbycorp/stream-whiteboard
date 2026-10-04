@@ -46,7 +46,8 @@ fn set_tablet(app: AppHandle, host: String, port: u16, shared: State<Arc<tablet:
     }
 }
 
-/// Desktop → tablet control: clear | undo | rotate (landscape toggle).
+/// Desktop → tablet control: clear | undo | rotate (landscape toggle) | resync
+/// (ask for a fresh mirror keyframe).
 /// Tablet applies the action and rebroadcasts so the app stays in sync via
 /// the normal clear/undo/hello events.
 #[tauri::command]

@@ -81,7 +81,7 @@ pub struct Shared {
     pub snapshot: Mutex<LinkState>,
 }
 
-/// Send a control command to the tablet (`clear`, `undo`, `rotate`).
+/// Send a control command to the tablet (`clear`, `undo`, `rotate`, `resync`).
 /// Returns Ok(()) if written, Err if not connected or write failed.
 pub fn send_cmd(shared: &Shared, cmd: &str) -> Result<(), String> {
     let safe: String = cmd
@@ -175,7 +175,9 @@ fn connect(target: &Target) -> Result<TcpStream, String> {
 
 fn read_stream(app: &AppHandle, shared: &Shared, mut stream: TcpStream) -> String {
     let mut lb = LineBuffer::new();
-    let mut buf = [0u8; 4096];
+    // Big reads: mirror keyframes and `ans` bitmaps are single lines of
+    // hundreds of KB. The LineBuffer itself has no line-length limit.
+    let mut buf = vec![0u8; 64 * 1024];
     let reason = loop {
         match stream.read(&mut buf) {
             Ok(0) => break "tablet closed the connection".into(),
