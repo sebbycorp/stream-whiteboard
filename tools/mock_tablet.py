@@ -10,8 +10,14 @@ Every third stroke it also fakes a circle-to-ask: an `eraserect` for the ink it
 "answered", then an `ans` bitmap — the tablet's AI answers are PNG layers rather
 than strokes, so this is the only way to exercise that path without the device.
 
+Stream mirror ("Live stream: Screen"): the hello carries fbw/fbh/mirror, and the
+mock keeps a fake 1404x1872 RGB panel (grey top bar, side dock, footer, paper).
+It sends a whole-panel `fb` keyframe (key:1) on connect, a small `fb` tile for
+the damage of every finished stroke, and a fresh keyframe on `cmd:resync` or
+clear. `--no-mirror` sends an old-style hello (no fb), as a tablet set to Ink.
+
 Usage:
-  python3 tools/mock_tablet.py
+  python3 tools/mock_tablet.py [--no-mirror] [--port N]
   # then in the app set host 127.0.0.1, port 27182, click Apply
 """
 import base64
@@ -19,10 +25,18 @@ import json
 import select
 import socket
 import struct
+import sys
 import time
 import zlib
 
 HOST, PORT = "0.0.0.0", 27182
+MIRROR = "--no-mirror" not in sys.argv
+if "--port" in sys.argv:
+    PORT = int(sys.argv[sys.argv.index("--port") + 1])
+
+# Fake panel geometry for the mirror (full screen, incl. tablet chrome).
+FB_W, FB_H = 1404, 1872
+TOP_BAR, FOOTER, DOCK_W = 96, 64, 88
 
 # 5x7 block glyphs — enough to spell a recognisable answer. stdlib only, so
 # there is no font engine here; this is deliberately crude.
@@ -48,15 +62,16 @@ GLYPHS = {
 }
 
 
-def png_rgba(w, h, rows):
-    """Minimal RGBA PNG encoder (zlib + struct — no pillow)."""
+def png_rgba(w, h, rows, color_type=6):
+    """Minimal PNG encoder (zlib + struct — no pillow). color_type 6 = RGBA,
+    2 = RGB (what the tablet's capture_png sends for mirror pieces)."""
     raw = b"".join(b"\x00" + bytes(r) for r in rows)
 
     def chunk(tag, data):
         c = tag + data
         return struct.pack(">I", len(data)) + c + struct.pack(">I", zlib.crc32(c) & 0xFFFFFFFF)
 
-    ihdr = struct.pack(">IIBBBBB", w, h, 8, 6, 0, 0, 0)   # 8-bit RGBA
+    ihdr = struct.pack(">IIBBBBB", w, h, 8, color_type, 0, 0, 0)
     return (b"\x89PNG\r\n\x1a\n"
             + chunk(b"IHDR", ihdr)
             + chunk(b"IDAT", zlib.compress(raw, 6))
@@ -90,6 +105,66 @@ def answer_png(lines, w, h, px=10):
                                 row[o] = row[o + 1] = row[o + 2] = 0
                                 row[o + 3] = 255
     return png_rgba(w, h, rows)
+
+
+class Panel:
+    """Fake RGB framebuffer for the mirror: tablet chrome + paper + ink."""
+
+    def __init__(self, w=FB_W, h=FB_H):
+        self.w, self.h = w, h
+        self.reset()
+
+    def reset(self):
+        w, h = self.w, self.h
+        bar = b"\x3c\x3c\x44" * w
+        foot = b"\xdc\xdc\xe0" * w
+        body = b"\x30\x50\x80" * DOCK_W + b"\xff\xff\xff" * (w - DOCK_W)
+        rule = b"\x30\x50\x80" * DOCK_W + b"\xd8\xe4\xf4" * (w - DOCK_W)
+        self.rows = []
+        for y in range(h):
+            if y < TOP_BAR:
+                self.rows.append(bytearray(bar))
+            elif y >= h - FOOTER:
+                self.rows.append(bytearray(foot))
+            elif (y - TOP_BAR) % 80 == 79:
+                self.rows.append(bytearray(rule))   # ruled paper, so offsets show
+            else:
+                self.rows.append(bytearray(body))
+        # Dock "buttons": light squares down the side strip.
+        for i in range(6):
+            y0 = TOP_BAR + 24 + i * 96
+            for yy in range(y0, y0 + 56):
+                self.rows[yy][16 * 3:(16 + 56) * 3] = b"\xee\xee\xee" * 56
+
+    def dot(self, x, y, r=3, rgb=b"\x10\x10\x10"):
+        for yy in range(max(0, y - r), min(self.h, y + r + 1)):
+            x0, x1 = max(0, x - r), min(self.w, x + r + 1)
+            if x0 < x1:
+                self.rows[yy][x0 * 3:x1 * 3] = rgb * (x1 - x0)
+
+    def line(self, x0, y0, x1, y1):
+        n = max(abs(x1 - x0), abs(y1 - y0), 1)
+        for i in range(n + 1):
+            self.dot(x0 + (x1 - x0) * i // n, y0 + (y1 - y0) * i // n)
+
+    def png(self, x, y, w, h):
+        rows = [self.rows[yy][x * 3:(x + w) * 3] for yy in range(y, y + h)]
+        return png_rgba(w, h, rows, color_type=2)
+
+
+def send_fb(conn, panel, x, y, w, h, key=False):
+    """One mirror piece: the panel region (x,y,w,h), snapped/clamped like the device."""
+    x0, y0 = max(0, (x // 8) * 8), max(0, (y // 8) * 8)
+    x1, y1 = min(panel.w, -(-(x + w) // 8) * 8), min(panel.h, -(-(y + h) // 8) * 8)
+    if key:
+        x0, y0, x1, y1 = 0, 0, panel.w, panel.h
+    if x1 <= x0 or y1 <= y0:
+        return
+    png = panel.png(x0, y0, x1 - x0, y1 - y0)
+    b64 = base64.b64encode(png).decode("ascii")
+    send(conn, {"t": "fb", "x": x0, "y": y0, "w": x1 - x0, "h": y1 - y0,
+                "key": 1 if key else 0, "png": b64})
+    print(f"[mock] fb{' key' if key else ''} {x1 - x0}x{y1 - y0}@{x0},{y0} ({len(b64)} b64 bytes)")
 
 
 def send(conn, obj):
@@ -139,11 +214,45 @@ def send_answer(conn, w, h, rect):
     print(f"[mock] ans {w}x{h} ({len(png)} bytes png)")
 
 
+def hello(w, h):
+    msg = {"t": "hello", "proto": 1, "w": w, "h": h, "page": 0, "pages": 1}
+    if MIRROR:
+        msg.update({"fbw": FB_W, "fbh": FB_H, "mirror": 1})
+    return msg
+
+
 def draw_session(conn):
     w, h = 1404, 1872
     land = False
-    send(conn, {"t": "hello", "proto": 1, "w": w, "h": h, "page": 0, "pages": 1})
+    panel = Panel()
+    send(conn, hello(w, h))
     send(conn, {"t": "clear"})
+    if MIRROR:
+        send_fb(conn, panel, 0, 0, FB_W, FB_H, key=True)   # new viewer → keyframe
+
+    def mirror_cmd(cmd):
+        """Mirror side effects of a desktop cmd. Returns True if handled."""
+        if cmd == "resync":
+            if MIRROR:
+                send_fb(conn, panel, 0, 0, FB_W, FB_H, key=True)
+            return True
+        if cmd in ("clear", "erase", "eraseall") and MIRROR:
+            panel.reset()
+            send_fb(conn, panel, 0, 0, FB_W, FB_H, key=True)
+        return False
+
+    def stroke_damage(x0, y0, x1, y1):
+        """Paint the finished stroke into the fake panel and send its damage tile.
+        Canvas y sits below the tablet's top bar on the real panel."""
+        if not MIRROR:
+            return
+        py0, py1 = y0 + TOP_BAR, y1 + TOP_BAR
+        if py1 >= FB_H - FOOTER:
+            return
+        panel.line(x0, py0, x1, py1)
+        send_fb(conn, panel, min(x0, x1) - 8, min(py0, py1) - 8,
+                abs(x1 - x0) + 16, abs(py1 - py0) + 16)
+
     sid = 1
     y = 100
     stroke_count = 0
@@ -153,6 +262,8 @@ def draw_session(conn):
         buf, cmds = try_read_cmds(conn, buf)
         for cmd in cmds:
             print(f"[mock] cmd {cmd}")
+            if mirror_cmd(cmd):
+                continue
             if cmd in ("clear", "erase", "eraseall"):
                 send(conn, {"t": "clear"})
                 stroke_count = 0
@@ -164,7 +275,7 @@ def draw_session(conn):
             elif cmd in ("rotate", "landscape", "orient"):
                 land = not land
                 w, h = (1872, 1404) if land else (1404, 1872)
-                send(conn, {"t": "hello", "proto": 1, "w": w, "h": h, "page": 0, "pages": 1})
+                send(conn, hello(w, h))
                 print(f"[mock] orientation {w}x{h}")
 
         # one diagonal stroke, point by point, ~40 Hz
@@ -174,6 +285,8 @@ def draw_session(conn):
             buf, cmds = try_read_cmds(conn, buf)
             for cmd in cmds:
                 print(f"[mock] cmd {cmd}")
+                if mirror_cmd(cmd):
+                    continue
                 if cmd in ("clear", "erase", "eraseall"):
                     send(conn, {"t": "up", "id": sid})
                     send(conn, {"t": "clear"})
@@ -193,7 +306,7 @@ def draw_session(conn):
                 if cmd in ("rotate", "landscape", "orient"):
                     land = not land
                     w, h = (1872, 1404) if land else (1404, 1872)
-                    send(conn, {"t": "hello", "proto": 1, "w": w, "h": h, "page": 0, "pages": 1})
+                    send(conn, hello(w, h))
             else:
                 send(conn, {"t": "move", "id": sid, "x": 100 + i * 18, "y": y + i * 4})
                 time.sleep(0.025)
@@ -201,6 +314,7 @@ def draw_session(conn):
             break
         else:
             send(conn, {"t": "up", "id": sid})
+            stroke_damage(100, y, 100 + 59 * 18, y + 59 * 4)
             stroke_count += 1
             sid += 1
             if stroke_count % 3 == 0:
@@ -208,6 +322,7 @@ def draw_session(conn):
             y += 90
             if y > min(h - 100, 1700):
                 send(conn, {"t": "clear"})
+                mirror_cmd("clear")
                 stroke_count = 0
                 y = 100
             time.sleep(0.5)
@@ -222,7 +337,8 @@ def main():
     srv.bind((HOST, PORT))
     srv.listen(1)
     print(f"[mock] listening on {HOST}:{PORT} — Ctrl+C to stop")
-    print("[mock] accepts cmd clear|undo|rotate from the desktop app")
+    print("[mock] accepts cmd clear|undo|rotate|resync from the desktop app")
+    print(f"[mock] mirror {'on (fb pieces, Live stream: Screen)' if MIRROR else 'off (--no-mirror, Live stream: Ink)'}")
     while True:
         conn, addr = srv.accept()
         print(f"[mock] client {addr}")
