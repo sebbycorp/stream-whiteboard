@@ -53,6 +53,12 @@
     }
     #paper { z-index: 0; }
     #c { z-index: 1; }
+    /* Mirror: the tablet's own panel pixels (paper, ink, dock, menus, cards).
+       Kept up to date even while hidden so switching modes is instant. */
+    #mirror { z-index: 2; display: none !important; }
+    body.mirror #paper,
+    body.mirror #c { display: none !important; }
+    body.mirror #mirror { display: block !important; }
 
     /* Small floating menu button. Sits right of the macOS traffic lights,
        which now float over the board (titleBarStyle: Overlay). */
@@ -106,6 +112,7 @@
       border-radius: 6px; cursor: pointer; font-weight: 600;
     }
     #panel button.ghost { background: #333; }
+    #panel button:disabled { opacity: .4; cursor: default; }
     #panel button.active { background: #2e7d32; }
     #panel button.chroma.active { background: #1b5e20; }
     #panel .hint { font-size: 11px; color: #777; width: 100%; }
@@ -221,6 +228,10 @@
     </div>
     <div class="sep"></div>
     <div class="row">
+      <button id="btnMirror" class="ghost" title="Mirror the exact tablet screen — its menu, dock, colours and answer cards, pixel for pixel (V). Needs Live stream set to Screen on the tablet.">Mirror</button>
+      <button id="btnResync" class="ghost" title="Ask the tablet for a fresh full-screen frame (mirror mode)" disabled>Resync</button>
+    </div>
+    <div class="row">
       <button id="btnObs" class="ghost" title="OBS preset: fixed size, pin, hide chrome (O)">OBS</button>
       <button id="btnMeeting" class="ghost" title="Hide chrome for capture (M)">Meeting</button>
       <button id="btnPin" class="ghost" title="Always on top (P)">Pin</button>
@@ -232,7 +243,7 @@
       <button id="btnChroma" class="ghost chroma" title="Green paper for chroma key (G)">Chroma</button>
       <button id="btnFullscreen" class="ghost" title="Fullscreen (F)">Full</button>
     </div>
-    <div class="row"><span class="hint">⌘S save · ⌘C copy · ⌘Z undo · ⌘⌫ clear · R rotate · O OBS · M meeting · G chroma · D dark · T overlay · I click-thru</span></div>
+    <div class="row"><span class="hint">⌘S save · ⌘C copy · ⌘Z undo · ⌘⌫ clear · R rotate · V mirror · O OBS · M meeting · G chroma · D dark · T overlay · I click-thru</span></div>
     <div class="row"><span id="status">starting…</span></div>
     <div class="row"><span id="debug">page —×—</span></div>
   </div>
@@ -243,6 +254,7 @@
     <div id="sheet">
       <canvas id="paper" width="1404" height="1604"></canvas>
       <canvas id="c" width="1404" height="1604"></canvas>
+      <canvas id="mirror" width="1404" height="1872"></canvas>
     </div>
   </div>
 
@@ -272,6 +284,8 @@
     const ctx = canvas.getContext('2d', { alpha: true, desynchronized: true }) || canvas.getContext('2d');
     const paperCanvas = document.getElementById('paper');
     const paperCtx = paperCanvas.getContext('2d');
+    const mirrorCanvas = document.getElementById('mirror');
+    const mirrorCtx = mirrorCanvas.getContext('2d', { alpha: false }) || mirrorCanvas.getContext('2d');
     const sheet = document.getElementById('sheet');
     const stage = document.getElementById('stage');
     const menuBtn = document.getElementById('menuBtn');
@@ -287,6 +301,7 @@
     const STAGE_DARK = '#161619';
     const DARK_KEY = 'sw.darkBoard';
     const ROT_KEY = 'sw.viewRotation';
+    const MIRROR_KEY = 'sw.mirror';
     // OBS preset window size (portrait 3:4 @ 1080 tall — stable for Window Capture)
     const OBS_W = 810;
     const OBS_H = 1080;
@@ -306,6 +321,14 @@
     let isFullscreen = false;
     let redrawPending = false;
     let paperColor = PAPER_WHITE;
+
+    // Mirror mode: show the tablet panel pixels (`fb` events) instead of
+    // re-drawing strokes. fbW×fbH is the full panel incl. top bar + footer.
+    let mirrorMode = false;
+    let fbW = 1404, fbH = 1872;
+    let mirrorChain = Promise.resolve(); // serialises fb decode+draw in arrival order
+    let mirrorFrames = 0;
+    let helloMirror = null; // null = no hello yet; else whether hello had mirror:1
 
     // Retained scene: finished strokes/shapes. Live strokes sit in `live` until pen-up.
     // kind: 'path' | 'shape'
@@ -340,8 +363,9 @@
       if (!win || !twin.LogicalSize) return;
       const LONG = 1200;
       const rotated = (viewRotation % 180) !== 0;
-      const w = rotated ? pageH : pageW;
-      const h = rotated ? pageW : pageH;
+      const [vw, vh] = viewDims();
+      const w = rotated ? vh : vw;
+      const h = rotated ? vw : vh;
       let ww, wh;
       if (w >= h) { ww = LONG; wh = Math.round(LONG * h / w); }
       else { wh = LONG; ww = Math.round(LONG * w / h); }
@@ -410,8 +434,8 @@
       chromaOn = !!on;
       document.getElementById('btnChroma').classList.toggle('active', chromaOn);
       refreshBoardColors();
-      if (chromaOn) toast('Chroma paper · key #00B140 in OBS');
-      else toast(darkMode ? 'Dark board · light ink' : 'White paper');
+      if (chromaOn) toast('Chroma paper · key #00B140 in OBS' + mirrorNote());
+      else toast((darkMode ? 'Dark board · light ink' : 'White paper') + mirrorNote());
     }
 
     /**
@@ -472,7 +496,7 @@
       refreshBoardColors();
       if (opts && opts.quiet) return;
       if (chromaOn) toast(darkMode ? 'Dark ink palette · chroma paper still on' : 'Light ink palette · chroma paper still on');
-      else toast(darkMode ? 'Dark board · light ink' : 'White board · dark ink');
+      else toast((darkMode ? 'Dark board · light ink' : 'White board · dark ink') + mirrorNote());
     }
 
     async function setMeetingMode(on, opts) {
@@ -560,6 +584,10 @@
       const b = isFinite(bbox.minx)
         ? `x[${bbox.minx|0}..${bbox.maxx|0}] y[${bbox.miny|0}..${bbox.maxy|0}]`
         : 'x[—] y[—]';
+      if (mirrorMode) {
+        el.textContent = `mirror ${mirrorCanvas.width}×${mirrorCanvas.height} · ${mirrorFrames} pieces · last: ${setDebug._last || '—'}`;
+        return;
+      }
       el.textContent = `page ${pageW}×${pageH} · ${strokes.length} strokes · seen ${b} · last: ${setDebug._last || '—'}`;
     }
 
@@ -569,7 +597,7 @@
       const availW = stage.clientWidth - pad;
       const availH = stage.clientHeight - pad;
       const rotated = (viewRotation % 180) !== 0;
-      const cw = canvas.width, ch = canvas.height;
+      const [cw, ch] = viewDims();
       const fpW = rotated ? ch : cw;
       const fpH = rotated ? cw : ch;
       const scale = Math.min(availW / fpW, availH / fpH);
@@ -577,6 +605,12 @@
       sheet.style.width = (cw * scale) + 'px';
       sheet.style.height = (ch * scale) + 'px';
       sheet.style.transform = `rotate(${viewRotation}deg)`;
+    }
+
+    /** Size the sheet is laid out at: panel pixels in mirror mode, else the
+     *  writing band. */
+    function viewDims() {
+      return mirrorMode ? [mirrorCanvas.width, mirrorCanvas.height] : [canvas.width, canvas.height];
     }
 
     function setPageSize(w, h) {
@@ -602,23 +636,25 @@
 
     // ── Export: composite paper + ink → PNG ──────────────────────────────
     function compositeBoard() {
+      // Mirror mode exports the tablet's pixels as-is; otherwise paper + ink.
+      const layers = mirrorMode ? [mirrorCanvas] : [paperCanvas, canvas];
       // Ensure live ink is fully painted before capture.
-      redrawAll();
+      if (!mirrorMode) redrawAll();
+      const [sw, sh] = viewDims();
       const rotated = (viewRotation % 180) !== 0;
       const out = document.createElement('canvas');
-      out.width = rotated ? canvas.height : canvas.width;
-      out.height = rotated ? canvas.width : canvas.height;
+      out.width = rotated ? sh : sw;
+      out.height = rotated ? sw : sh;
       const g = out.getContext('2d');
-      g.fillStyle = paperColor;
+      g.fillStyle = mirrorMode ? '#ffffff' : paperColor;
       g.fillRect(0, 0, out.width, out.height);
       if (viewRotation) {
         // Bake the view rotation in so a saved PNG matches what's on screen.
         g.translate(out.width / 2, out.height / 2);
         g.rotate(viewRotation * Math.PI / 180);
-        g.translate(-canvas.width / 2, -canvas.height / 2);
+        g.translate(-sw / 2, -sh / 2);
       }
-      g.drawImage(paperCanvas, 0, 0);
-      g.drawImage(canvas, 0, 0);
+      for (const l of layers) g.drawImage(l, 0, 0);
       return out;
     }
 
@@ -983,6 +1019,100 @@
       toast(viewRotation === 0 ? 'Upright' : `Rotated ${viewRotation}°`);
     }
 
+    // ── Mirror: exact tablet screen ──────────────────────────────────────
+    function mirrorNote() {
+      return mirrorMode ? ' · ink view only (mirror shows tablet pixels)' : '';
+    }
+
+    function clearMirror() {
+      mirrorCtx.fillStyle = '#ffffff';
+      mirrorCtx.fillRect(0, 0, mirrorCanvas.width, mirrorCanvas.height);
+    }
+
+    /** Resize the mirror to the panel size (clears it — a keyframe follows). */
+    function setMirrorSize(w, h) {
+      if (w === mirrorCanvas.width && h === mirrorCanvas.height) return false;
+      fbW = w; fbH = h;
+      mirrorCanvas.width = w; mirrorCanvas.height = h;
+      clearMirror();
+      if (mirrorMode) resizeWindowToPage().then(fitCanvas);
+      return true;
+    }
+
+    function b64ToBytes(b64) {
+      const bin = atob(b64);
+      const out = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+      return out;
+    }
+
+    /**
+     * Queue one `fb` piece: panel-pixel PNG pasted unscaled at (x, y). Decoding
+     * is async, so every piece goes through one promise chain — a small tile
+     * must never land before the keyframe that preceded it. A bad piece is
+     * logged and skipped; the chain carries on.
+     */
+    function queueFb(msg) {
+      const b64 = typeof msg.png === 'string' ? msg.png : '';
+      const x = Number(msg.x), y = Number(msg.y);
+      if (!b64 || !Number.isFinite(x) || !Number.isFinite(y)) { setDebug('fb-bad'); return; }
+      let bytes;
+      try { bytes = b64ToBytes(b64); }
+      catch (err) { console.warn('fb: bad base64', err); setDebug('fb-bad'); return; }
+      const key = msg.key === 1 || msg.key === true;
+      mirrorChain = mirrorChain.then(async () => {
+        const bmp = await createImageBitmap(new Blob([bytes], { type: 'image/png' }));
+        try {
+          // A keyframe is the whole panel: trust its size if hello didn't say.
+          if (key && x === 0 && y === 0) setMirrorSize(bmp.width, bmp.height);
+          mirrorCtx.drawImage(bmp, Math.round(x), Math.round(y));
+        } finally {
+          if (bmp.close) bmp.close();
+        }
+        mirrorFrames++;
+        if (mirrorMode) setDebug(key ? 'fb key' : 'fb');
+      }).catch((err) => {
+        console.warn('fb: decode/draw failed', err);
+      });
+    }
+
+    /** Ask the tablet for a fresh whole-panel keyframe. */
+    async function sendResync(quiet) {
+      try {
+        await invoke('tablet_cmd', { cmd: 'resync' });
+        if (!quiet) toast('Resync → tablet');
+        return true;
+      } catch (err) {
+        console.warn('tablet_cmd resync', err);
+        if (!quiet) toast("Not connected · can't resync");
+        return false;
+      }
+    }
+
+    function warnNoMirror() {
+      if (mirrorMode && helloMirror === false) {
+        toast('Set Live stream to Screen on the tablet', 3200);
+        return true;
+      }
+      return false;
+    }
+
+    async function setMirror(on, opts) {
+      const quiet = opts && opts.quiet;
+      mirrorMode = !!on;
+      document.body.classList.toggle('mirror', mirrorMode);
+      document.getElementById('btnMirror').classList.toggle('active', mirrorMode);
+      document.getElementById('btnResync').disabled = !mirrorMode;
+      try { localStorage.setItem(MIRROR_KEY, mirrorMode ? '1' : '0'); } catch (err) { /* private mode */ }
+      if (!(opts && opts.boot)) await resizeWindowToPage();
+      fitCanvas();
+      setDebug(mirrorMode ? 'mirror' : 'ink');
+      if (mirrorMode && tabletLinked) sendResync(true);
+      if (quiet) return;
+      if (warnNoMirror()) return;
+      toast(mirrorMode ? 'Mirror · exact tablet screen' : 'Mirror off · ink view');
+    }
+
     // ── Protocol handler ─────────────────────────────────────────────────
     function handle(msg) {
       const t = msg.t;
@@ -1013,6 +1143,12 @@
           // Same page + size (e.g. reconnect with identical hello) — keep ink.
           requestRedraw();
         }
+
+        // Mirror fields (absent on older tablets → keep the default panel size).
+        const fw = msg.fbw | 0, fh = msg.fbh | 0;
+        if (fw > 0 && fh > 0 && fw <= 8192 && fh <= 8192) setMirrorSize(fw, fh);
+        helloMirror = msg.mirror === 1 || msg.mirror === true;
+        warnNoMirror();
 
         lastPage = newPage;
         pageW = newW; pageH = newH;
@@ -1112,6 +1248,10 @@
         });
         if (strokes.length !== before) requestRedraw();
         setDebug(`eraserect -${before - strokes.length}`);
+      } else if (t === 'fb') {
+        // Mirror piece. Always applied, even outside mirror mode, so turning
+        // the mode on shows a current screen straight away.
+        queueFb(msg);
       } else if (t === 'shape') {
         const s = {
           kind: 'shape',
@@ -1130,8 +1270,11 @@
     function applyStatus(s) {
       if (!s) return;
       if (s.state === 'connected') {
+        const wasLinked = tabletLinked;
         tabletLinked = true;
         setStatus(`connected · ${s.host}`, true);
+        // (Re)connected in mirror mode: ask for a keyframe straight away.
+        if (mirrorMode && !wasLinked) sendResync(true);
       } else if (s.state === 'connecting') {
         tabletLinked = false;
         setStatus(`connecting to ${s.host}…`, false);
@@ -1182,6 +1325,8 @@
     document.getElementById('btnSave').onclick = () => savePng('board');
     document.getElementById('btnCopy').onclick = () => copyBoard();
     document.getElementById('btnExports').onclick = () => openExports();
+    document.getElementById('btnMirror').onclick = () => { setMirror(!mirrorMode); };
+    document.getElementById('btnResync').onclick = () => { sendResync(false); };
     document.getElementById('btnObs').onclick = () => setObsMode(!obsMode);
     document.getElementById('btnMeeting').onclick = () => {
       if (obsMode) setObsMode(false);
@@ -1212,6 +1357,9 @@
       } else if (key === 'o' && !mod) {
         e.preventDefault();
         setObsMode(!obsMode);
+      } else if (key === 'v' && !mod) {
+        e.preventDefault();
+        setMirror(!mirrorMode);
       } else if (key === 'g' && !mod) {
         e.preventDefault();
         setChroma(!chromaOn);
@@ -1277,6 +1425,9 @@
 
     setPageSize(pageW, pageH);
     clearScene();
+    clearMirror();
+    try { setMirror(localStorage.getItem(MIRROR_KEY) === '1', { quiet: true, boot: true }); }
+    catch (err) { /* private mode — ink view */ }
     fitCanvas();
     setDebug();
     init().catch((err) => {
