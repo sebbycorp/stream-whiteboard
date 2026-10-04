@@ -4,7 +4,7 @@
 **Framing:** one JSON object per line (NDJSON), UTF-8.  
 **Direction:**
 - **Tablet → desktop** — strokes and page events (server push)
-- **Desktop → tablet** — optional control commands (`clear` / `undo` / `rotate`)
+- **Desktop → tablet** — optional control commands (`clear` / `undo` / `rotate` / `resync`)
 
 Version field: `"proto": 1` on `hello`.
 
@@ -15,13 +15,15 @@ Version field: `"proto": 1` on `hello`.
 ### `hello` — connection / orientation
 
 ```json
-{"t":"hello","proto":1,"w":1404,"h":1604,"page":0,"pages":2}
+{"t":"hello","proto":1,"w":1404,"h":1604,"page":0,"pages":2,"fbw":1404,"fbh":1872,"mirror":1}
 ```
 
 | Field | Meaning |
 |-------|---------|
 | `w`, `h` | Writing surface in canvas units — the tablet content band, **not** the full panel. Top bar and footer chrome are stripped. Stroke `x`/`y` use this origin (y=0 is the top of the paper, just below the menu). Portrait RM2 is typically 1404×1604. |
 | `page`, `pages` | Current page index (0-based) and page count |
+| `fbw`, `fbh` | *(optional, stream mirror)* Full panel size in pixels, including the top bar and footer — the coordinate space of `fb` events. RM2 portrait: 1404×1872 |
+| `mirror` | *(optional)* `1` when the tablet streams `fb` screen pieces (Settings → Live stream to desktop → **Screen**), `0` for Ink. Absent on older builds — treat as 0 |
 
 Sent when stream starts and when orientation changes (landscape toggle).
 
@@ -132,11 +134,40 @@ Drop every stroke whose **bounding-box centre** lies inside the rect — the sam
 test `erase_strokes_in_region()` applies on the device, so both sides keep the
 same ink.
 
+### `fb` — stream mirror: a piece of the tablet screen
+
+```json
+{"t":"fb","x":0,"y":0,"w":1404,"h":1872,"key":1,"png":"iVBORw0KGgo…"}
+```
+
+| Field | Meaning |
+|-------|---------|
+| `x`, `y`, `w`, `h` | Region in **panel pixels** (full screen incl. top bar, dock and footer — `fbw`×`fbh` space), *not* canvas units |
+| `key` | `1` = keyframe covering the whole panel; `0` = a damage piece |
+| `png` | Base64 **RGB** PNG of exactly that region of the framebuffer |
+
+Sent only when the tablet's Live stream is set to **Screen** (`hello.mirror:1`).
+The rectangles are what the device actually refreshed on the glass (merged and
+snapped outward to 8 px), so pasting every piece reproduces the panel exactly —
+paper, ink colours, menus, popups and answer cards. A keyframe is sent to each
+new viewer and on `cmd:resync`. Pieces are rate-limited (≤ every 100 ms, and
+only while no viewer has queued output). Keyframes are a single line of roughly
+100–400 KB; readers must not cap line length.
+
+**Client rules:** draw each piece unscaled at (`x`, `y`) on a `fbw`×`fbh`
+canvas, **in arrival order** (decoding is async — serialise it), and never
+recolour the pixels. Clients that don't show the mirror ignore `fb`.
+
 ---
 
 ## Commands (desktop → tablet)
 
-> ⚠️ **Status: specified, NOT implemented on the device (verified 2026-08-19).**
+> ✅ **`resync` is implemented on the device** (stream mirror, 2026-10): the
+> tablet now reads client lines into a per-viewer buffer and parses them, and
+> `{"t":"cmd","cmd":"resync"}` makes it send a fresh `fb` keyframe. Unknown
+> commands are ignored.
+>
+> ⚠️ **`clear` / `undo` / `rotate`: specified, NOT implemented on the device (verified 2026-08-19).**
 > `stream.c`'s `stream_poll()` reads client bytes into a buffer named `junk`
 > solely to detect disconnects — nothing parses them, and `stream.h` exposes no
 > command callback. A desktop `write()` therefore *succeeds* while the tablet
@@ -158,6 +189,7 @@ One NDJSON line per command. Tablet applies the action (diary screen only) and
 {"t":"cmd","cmd":"clear"}
 {"t":"cmd","cmd":"undo"}
 {"t":"cmd","cmd":"rotate"}
+{"t":"cmd","cmd":"resync"}
 ```
 
 | `cmd` | Tablet action | Broadcast |
@@ -165,6 +197,7 @@ One NDJSON line per command. Tablet applies the action (diary screen only) and
 | `clear` | Clear current page strokes | `{"t":"clear"}` |
 | `undo` | Undo last stroke (if any) | `{"t":"undo"}` |
 | `rotate` | Toggle landscape / portrait | `{"t":"hello",…}` with new `w`/`h` |
+| `resync` | **Implemented.** Mark the whole panel dirty (stream mirror) | `{"t":"fb",…,"key":1}` to the viewers |
 
 Aliases accepted by the tablet parser: `erase` / `eraseall` → clear;  
 `landscape` / `orient` → rotate.
@@ -182,7 +215,10 @@ Unknown `t` / `cmd` values are ignored (forward compatible).
 5. Prefer sending `cmd` for Clear / Undo so the tablet is source of truth — **once the device implements the parser** (see the warning above). Today, only tablet → desktop events are live.
 6. On `ans`, composite the PNG under the ink; on `eraserect`, drop strokes
    whose bbox centre is inside the rect.
-7. Ignore unknown `t` values for forward compatibility.
+7. On `fb`, paste the PNG unscaled at (`x`,`y`) on a `fbw`×`fbh` canvas, in
+   arrival order; send `cmd:resync` to get a keyframe when you (re)connect or
+   start showing the mirror.
+8. Ignore unknown `t` values for forward compatibility.
 
 ## Future (proto 2+)
 
